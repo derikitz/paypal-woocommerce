@@ -799,6 +799,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
             'shipping_update_url' => add_query_arg(array('angelleye_ppcp_action' => 'shipping_address_update', 'utm_nooverride' => '1', 'from' => is_checkout_pay_page() ? 'pay_page' : $page), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
             'cart_total' => WC()->cart->total,
             'paymentaction' => $this->paymentaction,
+            'payment_status_unconfirmed' => __('Payment status could not be confirmed. Check your order status before attempting another payment.', 'paypal-for-woocommerce'),
             'advanced_card_payments' => ($this->advanced_card_payments === true) ? 'yes' : 'no',
             'three_d_secure_contingency' => $this->three_d_secure_contingency,
             'woocommerce_process_checkout' => wp_create_nonce('woocommerce-process_checkout'),

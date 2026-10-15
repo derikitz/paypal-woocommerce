@@ -249,16 +249,22 @@ const angelleyeOrder = {
             return data;
         });
     },
-    approveOrder: ({orderID, payerID, errorLogId}) => {
+    approveOrder: ({orderID, payerID, errorLogId, deferRedirect = false}) => {
         if (angelleyeOrder.isCheckoutPage()) {
-            angelleyeOrder.checkoutFormCapture({payPalOrderId: orderID, errorLogId})
+            return angelleyeOrder.checkoutFormCapture({payPalOrderId: orderID, errorLogId, deferRedirect});
         } else {
+            let redirect;
             if (angelleye_ppcp_manager.is_skip_final_review === 'yes') {
-                window.location.href = angelleye_ppcp_manager.direct_capture + '&paypal_order_id=' + orderID + '&paypal_payer_id=' + payerID + '&from=' + angelleye_ppcp_manager.page;
+                redirect = angelleye_ppcp_manager.direct_capture + '&paypal_order_id=' + orderID + '&paypal_payer_id=' + payerID + '&from=' + angelleye_ppcp_manager.page;
             } else {
-                window.location.href = angelleye_ppcp_manager.checkout_url + '&paypal_order_id=' + orderID + (payerID ? '&paypal_payer_id=' + payerID : '') + '&from=' + angelleye_ppcp_manager.page;
+                redirect = angelleye_ppcp_manager.checkout_url + '&paypal_order_id=' + orderID + (payerID ? '&paypal_payer_id=' + payerID : '') + '&from=' + angelleye_ppcp_manager.page;
             }
-    }
+            if (!deferRedirect) {
+                window.location.href = redirect;
+            }
+            // The server-side capture/review still happens after this handoff.
+            return Promise.resolve({result: 'redirect', redirect});
+        }
     },
     shippingAddressUpdate: (shippingDetails, billingDetails, errorLogId) => {
         return angelleyeOrder.createOrder({apiUrl: angelleye_ppcp_manager.shipping_update_url, shippingDetails, billingDetails, errorLogId});
@@ -476,7 +482,7 @@ const angelleyeOrder = {
             });
         }
     },
-    checkoutFormCapture: ({checkoutSelector, payPalOrderId, errorLogId}) => {
+    checkoutFormCapture: ({checkoutSelector, payPalOrderId, errorLogId, deferRedirect = false}) => {
         if (typeof checkoutSelector === 'undefined') {
             checkoutSelector = angelleyeOrder.getCheckoutSelectorCss();
         }
@@ -492,21 +498,47 @@ const angelleyeOrder = {
             });
             jQuery(checkoutSelector).submit();
         }
-        fetch(captureUrl, {
+        return fetch(captureUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded'
             },
             body: data
         }).then(function (res) {
+            if (!res.ok) {
+                throw new Error(localizedMessages.general_error_message);
+            }
             return res.json();
         }).then(function (data) {
-            window.location.href = data.data.redirect;
+            const outcome = data && data.data;
+            if (!data || data.success !== true || !outcome ||
+                typeof outcome.redirect !== 'string' || outcome.redirect === '' ||
+                !['success', 'failure'].includes(outcome.result)) {
+                throw new Error(localizedMessages.general_error_message);
+            }
+            if (outcome.result === 'failure' && deferRedirect) {
+                const error = new Error(localizedMessages.general_error_message);
+                error.captureDeclined = true;
+                throw error;
+            }
+            if (!deferRedirect) {
+                window.location.href = outcome.redirect;
+            }
+            return outcome;
         }).catch((error) => {
-            console.log('capture error', error);
             jQuery(checkoutSelector).removeClass('processing paypal_cc_submiting CardFields createOrder');
+            if (deferRedirect) {
+                if (!error || typeof error !== 'object') {
+                    error = new Error(typeof error === 'string' ? error : localizedMessages.general_error_message);
+                }
+                if (!error.captureDeclined) {
+                    error.paymentStatusUncertain = true;
+                }
+                throw error;
+            }
             angelleyeOrder.handleCreateOrderError(error, errorLogId);
             angelleyeOrder.hideProcessingSpinner('#customer_details, .woocommerce-checkout-review-order');
+            return {result: 'failure'};
         });
     },
     renderHostedButtons: () => {

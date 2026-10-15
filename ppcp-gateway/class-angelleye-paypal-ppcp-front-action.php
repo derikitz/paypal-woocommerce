@@ -561,7 +561,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                     $is_success = false;
                     wc_add_notice(__('Something went wrong. Please try again.', 'paypal-for-woocommerce'), 'error');
                 }
-                if ($is_success) {
+                if ($is_success === true) {
                     WC()->cart->empty_cart();
                     AngellEye_Session_Manager::clear();
                     if (ob_get_length())

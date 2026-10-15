@@ -108,8 +108,7 @@ class GooglePayCheckoutButton {
     }
 
     parseErrorMessage(errorObject) {
-        console.log(errorObject, JSON.stringify(errorObject));
-        if (errorObject.name === 'PayPalGooglePayError') {
+        if (errorObject && errorObject.name === 'PayPalGooglePayError') {
             let debugID = errorObject.paypalDebugId;
             switch (errorObject.errorName) {
                 case 'ERROR_VALIDATING_MERCHANT':
@@ -120,26 +119,50 @@ class GooglePayCheckoutButton {
                     return localizedMessages.general_error_message + ' [GooglePay DebugId:' + debugID + ']';
             }
         }
-        return errorObject;
+        return typeof errorObject === 'string' ? errorObject :
+            (errorObject && typeof errorObject.message === 'string' ? errorObject.message : localizedMessages.general_error_message);
     }
 
-    onPaymentAuthorized(additionalData, paymentData) {
-        // let thisObj = this;
-        console.log('onPaymentAuthorized', additionalData, paymentData);
+    paymentError(error) {
+        return {transactionState: 'ERROR', error: {
+            intent: 'PAYMENT_AUTHORIZATION',
+            reason: 'PAYMENT_DATA_INVALID',
+            message: this.parseErrorMessage(error)
+        }};
+    }
 
-        return new Promise( (resolve, reject) => {
-            angelleyeOrder.showProcessingSpinner();
-            additionalData.thisObject.processPayment(additionalData, paymentData)
-                .then(function (data) {
-                    resolve({ transactionState: "SUCCESS" });
-                })
-                .catch(function (error) {
-                    let errorMessage = additionalData.thisObject.parseErrorMessage(error);
-                    angelleyeOrder.hideProcessingSpinner();
-                    angelleyeOrder.showError(errorMessage);
-                    resolve({ transactionState: "ERROR" });
-                });
-        });
+    async onPaymentAuthorized(additionalData, paymentData) {
+        const thisObject = additionalData.thisObject;
+        if (thisObject.paymentInFlight || thisObject.paymentStatusUncertain) {
+            return thisObject.paymentError(angelleye_ppcp_manager.payment_status_unconfirmed);
+        }
+        thisObject.pendingRedirect = null;
+        angelleyeOrder.showProcessingSpinner();
+        let timeout;
+        try {
+            const payment = Promise.resolve().then(() => thisObject.processPayment(additionalData, paymentData))
+                .finally(() => { thisObject.paymentInFlight = null; });
+            thisObject.paymentInFlight = payment;
+            const outcome = await Promise.race([payment, new Promise((resolve, reject) => {
+                // Google requires an authorization callback response within 30s.
+                timeout = setTimeout(() => {
+                    thisObject.paymentStatusUncertain = true;
+                    reject(new Error(angelleye_ppcp_manager.payment_status_unconfirmed));
+                }, 25000);
+            })]);
+            if (!outcome || outcome.transactionState !== 'SUCCESS' || typeof outcome.redirect !== 'string' || outcome.redirect === '') {
+                throw new Error(outcome && outcome.error ? outcome.error.message : localizedMessages.general_error_message);
+            }
+            thisObject.pendingRedirect = outcome.redirect;
+            return {transactionState: 'SUCCESS'};
+        } catch (error) {
+            const result = thisObject.paymentError(error);
+            angelleyeOrder.hideProcessingSpinner();
+            angelleyeOrder.showError(result.error.message);
+            return result;
+        } finally {
+            clearTimeout(timeout);
+        }
     }
 
     onPaymentDataChanged(additionalData, intermediatePaymentData) {
@@ -178,7 +201,6 @@ class GooglePayCheckoutButton {
 
     async processPayment(additionalData, paymentData) {
         try {
-            console.log('processPayment', additionalData, JSON.stringify(paymentData));
             let thisObject = additionalData.thisObject;
             angelleyeOrder.showProcessingSpinner();
             /* Create Order */
@@ -186,7 +208,9 @@ class GooglePayCheckoutButton {
                 angelleye_ppcp_button_selector: thisObject.containerSelector,
                 errorLogId: additionalData.thisObject.errorLogId
             }).then((orderData) => {
-                console.log('orderCreated', orderData);
+                if (!orderData || !orderData.orderID) {
+                    throw new Error(localizedMessages.general_error_message);
+                }
                 angelleyeOrder.updateCartTotalsInEnvironment(orderData);
                 return orderData.orderID;
             });
@@ -213,21 +237,20 @@ class GooglePayCheckoutButton {
                     await angelleyeOrder.shippingAddressUpdate({shippingDetails}, {billingDetails}, additionalData.thisObject.errorLogId);
                 }
                 /* Capture the Order */
-                angelleyeOrder.approveOrder({orderID: orderID, payerID: ''});
-                return { transactionState: "SUCCESS" };
+                const outcome = await angelleyeOrder.approveOrder({orderID, payerID: '', errorLogId: additionalData.thisObject.errorLogId, deferRedirect: true});
+                if (!outcome || !['success', 'redirect'].includes(outcome.result) || typeof outcome.redirect !== 'string' || outcome.redirect === '') {
+                    throw new Error(localizedMessages.general_error_message);
+                }
+                return {transactionState: 'SUCCESS', redirect: outcome.redirect};
             } else {
-                return { transactionState: "ERROR" };
+                return thisObject.paymentError(localizedMessages.general_error_message);
             }
         } catch (error) {
-            console.log('processPaymentError', error);
-            angelleyeOrder.handleCreateOrderError(additionalData.thisObject.parseErrorMessage(error), additionalData.thisObject.errorLogId);
-
-            return {
-                transactionState: "ERROR",
-                error: {
-                    message: error.message,
-                },
-            };
+            if (error && error.paymentStatusUncertain) {
+                additionalData.thisObject.paymentStatusUncertain = true;
+                return additionalData.thisObject.paymentError(angelleye_ppcp_manager.payment_status_unconfirmed);
+            }
+            return additionalData.thisObject.paymentError(error);
         }
     }
 
@@ -307,20 +330,29 @@ class GooglePayCheckoutButton {
     }
 
     async handleClickEvent(event, thisObject) {
+        if (thisObject.paymentInFlight || thisObject.paymentStatusUncertain) {
+            angelleyeOrder.showError(angelleye_ppcp_manager.payment_status_unconfirmed);
+            return;
+        }
         console.log('click event', event, thisObject.containerSelector);
         thisObject.errorLogId = angelleyeJsErrorLogger.generateErrorId();
         const cartDetails = angelleyeOrder.getCartDetails();
         if (cartDetails.totalAmount <= 0) {
             angelleyeOrder.showError(localizedMessages.empty_cart_message);
+            return;
         }
         angelleyeJsErrorLogger.addToLog(thisObject.errorLogId, 'Google Pay Payment Started');
         angelleyeOrder.setPaymentMethodSelector('google_pay');
         const paymentDataRequest = thisObject.getGooglePaymentDataRequest();
         const paymentsClient = thisObject.getGooglePaymentsClient({});
 
-        paymentsClient.loadPaymentData(paymentDataRequest).then((success) => {
-            console.log('success', success);
+        thisObject.pendingRedirect = null;
+        return paymentsClient.loadPaymentData(paymentDataRequest).then(() => {
+            if (thisObject.pendingRedirect) {
+                window.location.href = thisObject.pendingRedirect;
+            }
         }, (e) => {
+            thisObject.pendingRedirect = null;
             angelleyeOrder.triggerPaymentCancelEvent();
             angelleyeOrder.hideProcessingSpinner(thisObject.containerSelector);
             angelleyeOrder.hideProcessingSpinner();

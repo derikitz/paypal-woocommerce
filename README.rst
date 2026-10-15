@@ -63,6 +63,31 @@ stubbed HTTP and transient storage.
 Run ``php tests/security/payment-idempotency.php`` to check durable operation
 identity, order locks, partial payments, and refund bookkeeping with stubbed
 WordPress storage.
+Run ``node tests/security/google-pay.cjs`` to check Google Pay authorization,
+capture errors, callback deadlines, and navigation against both readable and
+production JavaScript bundles. Run ``php tests/security/capture-outcome.php`` to
+check that only an explicit successful capture result empties the cart and
+returns a successful checkout response.
+
+Google Pay capture handling
+---------------------------
+
+Checkout authorization awaits the server capture/authorization outcome. Failed
+or malformed responses stay errors in the Google Pay sheet. Navigation waits
+until the sheet closes. Product/cart flows that require a review or server-side
+redirect continue to hand off to that route; a handoff is not confirmation that
+funds have been captured.
+
+The authorization callback has a 25-second deadline. A timeout or uncertain
+capture response asks the buyer to check order status and blocks another payment
+attempt in that page instance. The server request may still finish after a client
+timeout. Additional authentication responses are rejected without capture; this
+change does not implement a new 3D Secure challenge flow.
+
+The updated ``.min.js`` files were rebuilt with Terser 5.51.2 using ``--compress
+--mangle``. Keep both production bundles synchronized with their readable sources.
+Live Google Pay sheets, browser cancellation, slow network behaviour, and classic
+checkout/Blocks compatibility still require staging verification.
 
 Payment operation records
 -------------------------
