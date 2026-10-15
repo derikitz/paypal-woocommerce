@@ -170,17 +170,18 @@ class Cartflows_Pro_Gateway_PayPal_PPCP_AngellEYE extends Cartflows_Pro_Paypal_G
             if (ob_get_length()) {
                 ob_end_clean();
             }
-            if (is_wp_error($response)) {
+            if (AngellEYE_PayPal_PPCP_Response::is_error($response)) {
+                $error_message = is_wp_error($response) ? $response->get_error_message() : ($response['message'] ?? 'PayPal request failed.');
                 $json_response = array(
                     'status' => false,
-                    'message' => $response->get_error_message(),
+                    'message' => $error_message,
                     'paypal_order_id' => '',
                     'redirect_url' => '',
                     'response' => $response,
                 );
                 wcf()->logger->log(
                         "PayPal order is not created. Order: {$order_id}, Error: " .
-                        wp_json_encode($response->get_error_message())
+                        wp_json_encode($error_message)
                 );
                 return wp_send_json($json_response);
             } else {
@@ -227,17 +228,18 @@ class Cartflows_Pro_Gateway_PayPal_PPCP_AngellEYE extends Cartflows_Pro_Paypal_G
         $capture_url = 'https://api-m.' . $environment . 'paypal.com/v2/checkout/orders/' . $paypal_order_id . '/capture';
         $capture_args['angelleye_operation_scope'] = array('order_id' => $order_id, 'resource' => $paypal_order_id);
         $resp_body = $this->api_request->request($capture_url, $capture_args, 'capture_order');
-        if (is_wp_error($resp_body)) {
+        if (AngellEYE_PayPal_PPCP_Response::is_error($resp_body)) {
+            $error_message = is_wp_error($resp_body) ? $resp_body->get_error_message() : ($resp_body['message'] ?? 'PayPal request failed.');
             $json_response = array(
                 'status' => false,
-                'message' => $resp_body->get_error_message(),
+                'message' => $error_message,
                 'paypal_order_id' => '',
                 'redirect_url' => '',
                 'response' => $resp_body,
             );
             wcf()->logger->log(
                     "Order Created but not captured. For WC-Order: {$order_id}, Error: " .
-                    wp_json_encode($resp_body->get_error_message())
+                    wp_json_encode($error_message)
             );
         } else {
             $json_response = array(

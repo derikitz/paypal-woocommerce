@@ -194,7 +194,7 @@ class WFOCU_Paypal_For_WC_Gateway_AngellEYE_PPCP extends WFOCU_Gateway {
             $resp_body = $this->api_request->request($capture_url, $capture_args, 'capture_order');
             $existing_package = WFOCU_Core()->data->get('upsell_package', '', 'paypal');
             WFOCU_Core()->data->set('_upsell_package', $existing_package);
-            if (isset($resp_body['status']) && 'failed' === $resp_body['status']) {
+            if (AngellEYE_PayPal_PPCP_Response::is_error($resp_body)) {
                 $data = WFOCU_Core()->process_offer->_handle_upsell_charge(false);
                 WFOCU_Core()->log->log('Order #' . WFOCU_WC_Compatibility::get_order_id($get_order) . ': Unable to capture paypal Order refer error below' . print_r($resp_body, true));
             } else {
@@ -277,7 +277,7 @@ class WFOCU_Paypal_For_WC_Gateway_AngellEYE_PPCP extends WFOCU_Gateway {
                 $url = $this->get_api_base($environment) . 'v2/checkout/orders';
                 $arguments['angelleye_operation_scope'] = array('order_id' => $get_order->get_id(), 'resource' => 'funnelkit-offer:' . $get_current_offer);
                 $response = $this->api_request->request($url, $arguments, 'create_order');
-                if (isset($response['status']) && 'failed' === $response['status']) {
+                if (AngellEYE_PayPal_PPCP_Response::is_error($response)) {
                     $data = WFOCU_Core()->process_offer->_handle_upsell_charge(false);
                     $json_response = array(
                         'status' => false,

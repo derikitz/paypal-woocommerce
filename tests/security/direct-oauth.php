@@ -70,7 +70,7 @@ require dirname(__DIR__, 2) . '/ppcp-gateway/class-angelleye-paypal-ppcp-request
 
 class TestOAuthResponse extends AngellEYE_PayPal_PPCP_Response {
     public function __construct() {}
-    public function parse_response($response, $url, $request, $action) {
+    public function parse_response($response, $url, $request, $action, $log_response = true) {
         return is_wp_error($response) ? $response : json_decode($response['body'], true);
     }
 }

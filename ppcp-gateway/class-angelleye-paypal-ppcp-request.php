@@ -334,7 +334,7 @@ class AngellEYE_PayPal_PPCP_Request {
                 if ('generate_id_token' === $action_name && rtrim($url, '/') === $this->token_url) {
                     // OAuth responses contain server credentials (access tokens)
                     // and must not pass through the payment-body logger.
-                    return is_wp_error($this->result) ? null : json_decode(wp_remote_retrieve_body($this->result), true);
+                    return $this->api_response->parse_response($this->result, $url, $args, $action_name, false);
                 }
             } else {
                 $args['timeout'] = '60';
@@ -344,12 +344,14 @@ class AngellEYE_PayPal_PPCP_Request {
 
             $response = $this->api_response->parse_response($this->result, $url, $args, $action_name);
             if ($operation) {
-                $operation->record_response($response, is_wp_error($this->result) ? 0 : (int) wp_remote_retrieve_response_code($this->result));
+                $operation->record_response($response, is_array($response) && isset($response['http_status'])
+                    ? (int) $response['http_status'] : (is_wp_error($this->result) ? 0 : (int) wp_remote_retrieve_response_code($this->result)));
             }
             return $response;
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' .$ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+            return $this->api_response->parse_response(new WP_Error('paypal_request_exception', $ex->getMessage()), $url, $args, $action_name);
         } finally {
             if ($owned_operation) {
                 $owned_operation->close();
@@ -364,6 +366,7 @@ class AngellEYE_PayPal_PPCP_Request {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+            return $this->api_response->parse_response(new WP_Error('paypal_request_exception', $ex->getMessage()), $url, $args, $action_name);
         }
     }
 

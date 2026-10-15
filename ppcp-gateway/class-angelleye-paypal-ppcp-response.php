@@ -60,32 +60,113 @@ class AngellEYE_PayPal_PPCP_Response {
         add_action('angelleye_ppcp_request_respose_data', array($this, 'angelleye_ppcp_tpv_tracking'), 10, 3);
     }
 
-    public function parse_response($paypal_api_response, $url, $request, $action_name) {
+    public static function is_error($response) {
+        return is_wp_error($response) || $response === null || $response === false ||
+            (is_array($response) && (!empty($response['_angelleye_error']) || ($response['status'] ?? '') === 'failed'));
+    }
 
+    private function failure($name, $message, $http_status, $payload = array(), $transport_error = null, $debug_id = '') {
+        $details = array();
+        foreach (is_array($payload['details'] ?? null) ? $payload['details'] : array() as $detail) {
+            if (is_array($detail)) {
+                $details[] = array_merge($detail, array(
+                    'field' => is_string($detail['field'] ?? null) ? $detail['field'] : '',
+                    'issue' => is_string($detail['issue'] ?? null) ? $detail['issue'] : $name,
+                    'description' => is_string($detail['description'] ?? null) ? $detail['description'] : $message,
+                ));
+            }
+        }
+        if (!$details) {
+            $details[] = array('field' => '', 'issue' => $name, 'description' => $message);
+        }
+        // Errors deliberately have no payment status or resource ID: callers
+        // must not mistake a transport/API failure for an accepted payment.
+        $error = array(
+            '_angelleye_error' => true,
+            'name' => $name,
+            'message' => $message,
+            'details' => $details,
+            'issue' => $details[0]['issue'],
+            'debug_id' => is_string($payload['debug_id'] ?? null) ? $payload['debug_id'] : $debug_id,
+            'http_status' => $http_status,
+            'transport_error' => $transport_error,
+        );
+        foreach (array('error', 'error_description', 'links') as $key) {
+            if (isset($payload[$key]) && ($key === 'links' ? is_array($payload[$key]) : is_string($payload[$key]))) {
+                $error[$key] = $payload[$key];
+            }
+        }
+        return $error;
+    }
+
+    public function parse_response($paypal_api_response, $url, $request, $action_name, $log_response = true) {
         try {
             if (is_wp_error($paypal_api_response)) {
                 delete_transient('is_angelleye_aws_down');
-                $response = array(
-                    'status' => 'failed',
-                    'body' => array('error_message' => $paypal_api_response->get_error_message(), 'error_code' => $paypal_api_response->get_error_code())
-                );
-            } else {
-                $body = wp_remote_retrieve_body($paypal_api_response);
-                $status_code = (int) wp_remote_retrieve_response_code($paypal_api_response);
-                if (201 < $status_code && $action_name !== 'update_order') {
-                    delete_transient('is_angelleye_aws_down');
-                }
-                $response = !empty($body) ? json_decode($body, true) : '';
-                $response = isset($response['body']) ? $response['body'] : $response;
-                $this->angelleye_ppcp_write_log($url, $request, $paypal_api_response, $action_name);
-                if (strpos($url, 'paypal.com') !== false) {
-                    do_action('angelleye_ppcp_request_respose_data', $request, $response, $action_name);
-                }
-                return $response;
+                return $this->failure('TRANSPORT_ERROR', $paypal_api_response->get_error_message(), 0,
+                    array(), (string) $paypal_api_response->get_error_code());
             }
-        } catch (Exception $ex) {
-            $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' .$ex->getLine(), 'error');
-            $this->api_log->log($ex->getMessage(), 'error');
+            $status_code = (int) wp_remote_retrieve_response_code($paypal_api_response);
+            $body = wp_remote_retrieve_body($paypal_api_response);
+            $debug_id = $this->angelleye_ppcp_parse_headers(wp_remote_retrieve_headers($paypal_api_response), 'paypal-debug-id');
+            $response = $body !== '' ? json_decode($body, true) : null;
+            $valid_json = $body !== '' && json_last_error() === JSON_ERROR_NONE && is_array($response);
+            $outer_status = $status_code;
+            $proxy_failed = false;
+            if ($valid_json && array_key_exists('body', $response)) {
+                $envelope = $response;
+                $proxy_failed = ($envelope['status'] ?? '') === 'failed';
+                foreach (array('statusCode', 'status_code', 'http_status', 'httpStatusCode') as $key) {
+                    if (isset($envelope[$key]) && is_numeric($envelope[$key]) && (int) $envelope[$key] >= 100 && (int) $envelope[$key] <= 599) {
+                        $status_code = (int) $envelope[$key];
+                        break;
+                    }
+                }
+                $debug_id = $this->angelleye_ppcp_parse_headers($envelope['headers'] ?? array(), 'paypal-debug-id') ?: $debug_id;
+                $response = $envelope['body'];
+                if (is_string($response) && $response !== '') {
+                    $response = json_decode($response, true);
+                    $valid_json = json_last_error() === JSON_ERROR_NONE && is_array($response);
+                } else {
+                    $valid_json = is_array($response);
+                }
+                $body = $envelope['body'] === null ? '' : $envelope['body'];
+            }
+            $payload = $valid_json ? $response : array();
+            $api_error = $proxy_failed || ($payload['status'] ?? '') === 'failed' ||
+                (isset($payload['error']) && $payload['error'] !== false) ||
+                (isset($payload['name'], $payload['message']) && !isset($payload['id']));
+            if ($outer_status < 200 || $outer_status >= 300 || $status_code < 200 || $status_code >= 300 || $api_error) {
+                $name = is_string($payload['name'] ?? null) ? $payload['name'] :
+                    (is_string($payload['error'] ?? null) ? $payload['error'] : 'HTTP_ERROR');
+                $message = is_string($payload['message'] ?? null) ? $payload['message'] :
+                    (is_string($payload['error_description'] ?? null) ? $payload['error_description'] :
+                    (is_string($payload['error_message'] ?? null) ? $payload['error_message'] : 'PayPal returned an unsuccessful response.'));
+                $transport_error = $proxy_failed && is_string($payload['error_code'] ?? null) ? $payload['error_code'] : null;
+                $response = $this->failure($transport_error ? 'TRANSPORT_ERROR' : $name, $message,
+                    $outer_status >= 300 ? $outer_status : $status_code, $payload, $transport_error, $debug_id);
+            } elseif ($status_code === 204 && ($body === '' || $body === null)) {
+                $response = ''; // Preserve the existing successful no-content contract.
+            } elseif (!$valid_json) {
+                $response = $this->failure('INVALID_RESPONSE', 'PayPal returned an empty or malformed response.', $status_code, array(), null, $debug_id);
+            }
+            if (self::is_error($response) && ($outer_status >= 500 || $status_code >= 500 || $status_code === 0 ||
+                $response['transport_error'] !== null || $response['name'] === 'INVALID_RESPONSE')) {
+                delete_transient('is_angelleye_aws_down');
+            }
+            if ($log_response) {
+                try {
+                    $this->angelleye_ppcp_write_log($url, $request, $paypal_api_response, $action_name);
+                    if (!self::is_error($response) && strpos($url, 'paypal.com') !== false) {
+                        do_action('angelleye_ppcp_request_respose_data', $request, $response, $action_name);
+                    }
+                } catch (Throwable $ex) {
+                    // An observer/logger failure must not replace a payment result.
+                }
+            }
+            return $response;
+        } catch (Throwable $ex) {
+            return $this->failure('INVALID_RESPONSE', 'Unable to process the PayPal response.', 0);
         }
     }
 
@@ -179,41 +260,24 @@ class AngellEYE_PayPal_PPCP_Response {
     }
 
     public function angelleye_ppcp_parse_headers($headers, $key_debug) {
-        if (isset($headers[$key_debug])) {
-            return $headers[$key_debug];
-        }
+        $key_debug = strtolower($key_debug);
         if (is_string($headers)) {
-            $headers = str_replace("\r\n", "\n", $headers);
-            $headers = preg_replace('/\n[ \t]/', ' ', $headers);
-            $headers = explode("\n", $headers);
+            $headers = preg_split('/\r?\n/', $headers);
         }
-        if (isset($headers) && is_array($headers)) {
-            for ($i = count($headers) - 1; $i >= 0; $i--) {
-                if (!empty($headers[$i]) && false === strpos($headers[$i], ':')) {
-                    $headers = array_splice($headers, $i);
-                    break;
+        if (is_array($headers) || $headers instanceof Traversable) {
+            foreach ($headers as $key => $value) {
+                if (is_string($key) && strtolower($key) === $key_debug) {
+                    return is_scalar($value) ? trim((string) $value) : '';
                 }
-            }
-            $newheaders = array();
-            foreach ((array) $headers as $tempheader) {
-                if (empty($tempheader)) {
-                    continue;
-                }
-                if (strpos($tempheader, ':') !== false) {
-                    list($key, $value) = explode(':', $tempheader, 2);
-                    $key = strtolower($key);
-                    $value = trim($value);
-                    if (isset($newheaders[$key])) {
-                        if (!is_array($newheaders[$key])) {
-                            $newheaders[$key] = array($newheaders[$key]);
-                        }
-                        $newheaders[$key][] = $value;
-                    } else {
-                        $newheaders[$key] = $value;
+                if (is_int($key) && is_string($value) && strpos($value, ':') !== false) {
+                    list($name, $content) = explode(':', $value, 2);
+                    if (strtolower(trim($name)) === $key_debug) {
+                        return trim($content);
                     }
                 }
             }
-            return isset($newheaders[$key_debug]) ? $newheaders[$key_debug] : '';
+        } elseif ($headers instanceof ArrayAccess && isset($headers[$key_debug])) {
+            return is_scalar($headers[$key_debug]) ? (string) $headers[$key_debug] : '';
         }
         return '';
     }

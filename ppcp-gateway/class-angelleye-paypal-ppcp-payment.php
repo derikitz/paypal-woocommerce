@@ -1672,8 +1672,8 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'body' => $patch_request,
                 'user-agent' => 'PPCP/' . VERSION_PFW,
             );
-            $this->api_request->request($this->paypal_order_api . $paypal_order_id, $args, 'update_order');
-            return true;
+            $response = $this->api_request->request($this->paypal_order_api . $paypal_order_id, $args, 'update_order');
+            return !AngellEYE_PayPal_PPCP_Response::is_error($response);
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
@@ -2103,6 +2103,9 @@ class AngellEYE_PayPal_PPCP_Payment {
                 $args['body'] = $void_arg;
             }
             $this->api_response = $this->api_request->request($this->auth . $authorization_id . '/void', $args, 'void_authorized');
+            if ($this->api_response === '') {
+                return array('status' => 'VOIDED');
+            }
             $this->api_response = json_decode(json_encode($this->api_response), true);
             if (isset($this->api_response['status']) && strtolower($this->api_response['status']) == 'voided') {
                 return $this->api_response;

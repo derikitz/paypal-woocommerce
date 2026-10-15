@@ -68,6 +68,27 @@ capture errors, callback deadlines, and navigation against both readable and
 production JavaScript bundles. Run ``php tests/security/capture-outcome.php`` to
 check that only an explicit successful capture result empties the cart and
 returns a successful checkout response.
+Run ``php tests/security/response-normalization.php`` to check transport/API
+errors, proxy envelopes, debug headers, and successful no-content responses.
+
+API response errors
+-------------------
+
+The shared response parser returns normalized failure arrays marked with
+``_angelleye_error``. Use ``AngellEYE_PayPal_PPCP_Response::is_error()`` to identify
+them. Failures include ``name``, ``message``, ``details``, ``issue``, ``debug_id``,
+``http_status``, and ``transport_error``. The HTTP status reflects the upstream
+status when supplied by the proxy, otherwise the received HTTP status; transport
+failures without an HTTP response use zero. The transport error code is null for
+ordinary HTTP/API errors. Errors omit payment ``status`` and resource ``id`` so
+truthy error arrays cannot resemble accepted payments.
+
+Successful resource bodies retain their existing shape; successful HTTP 204
+responses retain the empty-string contract. The void caller maps a confirmed
+no-content result to ``VOIDED``. Failed order updates stop capture, and upsell
+adapters use the shared error predicate. ID-token responses are parsed without
+passing sensitive bodies to the payment logger. Logger/observer exceptions do
+not replace a valid payment response. Broader log redaction remains audit stage 7.
 
 Google Pay capture handling
 ---------------------------
