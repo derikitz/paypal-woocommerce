@@ -1,6 +1,7 @@
 <?php
 defined('ABSPATH') || exit;
 require_once __DIR__ . '/class-angelleye-paypal-ppcp-order-access.php';
+require_once __DIR__ . '/class-angelleye-paypal-ppcp-checkout-binding.php';
 
 class AngellEYE_PayPal_PPCP_Smart_Button {
 
@@ -1308,7 +1309,22 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
         return $fields;
     }
 
+    private function has_bound_checkout_details() {
+        try {
+            $id = $_GET['paypal_order_id'] ?? AngellEye_Session_Manager::get('paypal_order_id');
+            AngellEYE_PayPal_PPCP_Checkout_Binding::require_current($id, $this->payment_request);
+            $details = !empty($this->checkout_details) ? $this->checkout_details : AngellEye_Session_Manager::get('paypal_transaction_details');
+            if ($details) {
+                AngellEYE_PayPal_PPCP_Checkout_Binding::verify_response($id, $this->payment_request, json_decode(json_encode($details), true));
+            }
+            return true;
+        } catch (Exception $ex) {
+            return false;
+        }
+    }
+
     public function copy_checkout_details_to_post() {
+        if (!$this->has_bound_checkout_details()) { return; }
         if (empty($this->checkout_details)) {
             $this->checkout_details = AngellEye_Session_Manager::get('paypal_transaction_details');
             if (empty($this->checkout_details)) {
@@ -1372,6 +1388,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
     }
 
     public function angelleye_ppcp_session_manager() {
+        if (!$this->has_bound_checkout_details()) { return; }
         try {
             // remove the paypal_payer_id check as its not available everytime, found while testing the google pay
             if (!empty($_GET['paypal_order_id'])) {
@@ -1494,6 +1511,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
     }
 
     public function angelleye_ppcp_update_checkout_field_details() {
+        if (!$this->has_bound_checkout_details()) { return; }
         if (empty($this->checkout_details)) {
             $this->checkout_details = AngellEye_Session_Manager::get('paypal_transaction_details');
             if (empty($this->checkout_details)) {
@@ -2274,6 +2292,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
     }
 
     public function angelleye_ppcp_block_set_address() {
+        if (!$this->has_bound_checkout_details()) { return; }
         if (empty($this->checkout_details)) {
             $this->checkout_details = AngellEye_Session_Manager::get('paypal_transaction_details');
             if (empty($this->checkout_details)) {

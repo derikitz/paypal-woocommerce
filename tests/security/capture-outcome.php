@@ -8,9 +8,14 @@ class CaptureResponseSent extends Error {
     public function __construct($data) { $this->data = $data; }
 }
 class AngellEye_Session_Manager {
-    public static function get($key, $default = null) { return 'PAYPAL-ORDER'; }
+    public static $binding;
+    public static function get($key, $default = null) { return $key === 'checkout_binding' ? self::$binding : 'PAYPALORDER'; }
+    public static function set($key, $value) { if ($key === 'checkout_binding') self::$binding = $value; }
+    public static function unset($key) {}
     public static function clear() {}
 }
+function __($text, $domain = '') { return $text; }
+function get_current_user_id() { return 0; }
 function apply_filters($tag, $value, ...$args) { return $value; }
 function angelleye_ppcp_trigger_payment_successful_result($result, $order) { return apply_filters('woocommerce_payment_successful_result', $result, $order); }
 function angelleye_ppcp_get_awaiting_payment_order_id() { return 1; }
@@ -37,10 +42,13 @@ class CaptureTestPayment extends AngellEYE_PayPal_PPCP_Payment {
 }
 $handler = (new ReflectionClass('AngellEYE_PayPal_PPCP_Front_Action'))->newInstanceWithoutConstructor();
 $handler->payment_request = new CaptureTestPayment();
+$handler->payment_request->is_sandbox = true;
 $handler->paymentaction = 'capture';
 $handler->advanced_card_payments = false;
 $handler->is_sandbox = true;
 $_GET['is_pay_page'] = 'yes';
+$context_hash = hash('sha256', json_encode(array(true, '', null, null, null)));
+AngellEye_Session_Manager::$binding = array('remote_id' => 'PAYPALORDER', 'scope' => $context_hash, 'user_id' => 0, 'expires' => time() + 3600);
 $checks = 0;
 foreach (array(true, false, null, array('payer_action_required' => true), new WP_Error()) as $outcome) {
     $store = (object) array('cart' => new CaptureTestCart(), 'session' => new CaptureTestSession());

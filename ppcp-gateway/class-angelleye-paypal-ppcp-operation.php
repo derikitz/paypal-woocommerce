@@ -60,6 +60,10 @@ class AngellEYE_PayPal_PPCP_Operation {
         return $this->record['reference'];
     }
 
+    public function created_at() {
+        return $this->record['created_at'];
+    }
+
     public function has_been_submitted() {
         return $this->record['state'] !== 'new';
     }

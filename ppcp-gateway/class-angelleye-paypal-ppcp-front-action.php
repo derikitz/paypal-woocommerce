@@ -2,6 +2,7 @@
 
 defined('ABSPATH') || exit;
 require_once __DIR__ . '/class-angelleye-paypal-ppcp-order-access.php';
+require_once __DIR__ . '/class-angelleye-paypal-ppcp-checkout-binding.php';
 
 class AngellEYE_PayPal_PPCP_Front_Action {
 
@@ -111,6 +112,34 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                     wp_send_json_error(array('messages' => array(
                         __('Unable to access this order. Please reopen its payment link and try again.', 'paypal-for-woocommerce'),
                     )), 403);
+                    return;
+                }
+            }
+            if (in_array($_GET['angelleye_ppcp_action'], array('cc_capture', 'direct_capture', 'regular_capture', 'display_order_page'), true)) {
+                try {
+                    $remote_id = $_GET[$_GET['angelleye_ppcp_action'] === 'regular_capture' ? 'token' : 'paypal_order_id'] ?? null;
+                    $binding = AngellEYE_PayPal_PPCP_Checkout_Binding::require_current($remote_id, $this->payment_request);
+                    $candidate = WC()->session->get('order_awaiting_payment') ?: WC()->session->get('store_api_draft_order');
+                    if ($candidate) {
+                        AngellEYE_PayPal_PPCP_Checkout_Binding::check_local($remote_id, $this->payment_request, wc_get_order($candidate));
+                    } elseif (!empty($binding['order_id'])) {
+                        throw new RuntimeException('Missing local checkout session.');
+                    }
+                    if ($_GET['angelleye_ppcp_action'] === 'cc_capture') {
+                        $nonce = $_POST['woocommerce-process-checkout-nonce'] ?? $_GET['woocommerce-process-checkout-nonce'] ?? null;
+                        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST' || !is_string($nonce) ||
+                            !wp_verify_nonce(wp_unslash($nonce), 'woocommerce-process_checkout')) {
+                            throw new RuntimeException('Invalid checkout request.');
+                        }
+                    }
+                } catch (Exception $ex) {
+                    $message = __('Unable to verify this payment session. Check your order status before starting another payment.', 'paypal-for-woocommerce');
+                    if ($_GET['angelleye_ppcp_action'] !== 'cc_capture') {
+                        wc_add_notice($message, 'error');
+                        wp_safe_redirect(wc_get_checkout_url());
+                        exit();
+                    }
+                    wp_send_json_error(array('messages' => array($message)), 403);
                     return;
                 }
             }
@@ -581,6 +610,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
     }
 
     public function angelleye_ppcp_regular_capture() {
+        AngellEYE_PayPal_PPCP_Checkout_Binding::require_current($_GET['token'] ?? null, $this->payment_request);
         if (isset($_GET['token']) && !empty($_GET['token'])) {
             AngellEye_Session_Manager::set('paypal_order_id', wc_clean($_GET['token']));
         } else {
@@ -627,6 +657,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
 
     public function angelleye_ppcp_cc_capture() {
         try {
+            AngellEYE_PayPal_PPCP_Checkout_Binding::require_current(AngellEye_Session_Manager::get('paypal_order_id'), $this->payment_request);
             $this->paymentaction = apply_filters('angelleye_ppcp_paymentaction', $this->paymentaction, null);
             $angelleye_ppcp_paypal_order_id = AngellEye_Session_Manager::get('paypal_order_id', false);
             if (!empty($angelleye_ppcp_paypal_order_id)) {
@@ -732,6 +763,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                 exit();
             }
             $order = wc_get_order($order_id);
+            AngellEYE_PayPal_PPCP_Checkout_Binding::attach($_GET['paypal_order_id'] ?? null, $this->payment_request, $order);
             $this->payment_request->angelleye_ppcp_update_woo_order_data($_GET['paypal_order_id']);
             WC()->cart->empty_cart();
             AngellEye_Session_Manager::clear();

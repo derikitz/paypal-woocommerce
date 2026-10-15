@@ -34,6 +34,7 @@ Work proceeds in separate, reviewable stages:
 7. Redact sensitive payment logs.
 8. Authorize existing-order pay-page creation and totals requests.
 9. Preserve proxy request bodies, including partial-refund payloads.
+10. Bind browser callbacks and payment mutations to server-created PayPal orders.
 
 After each stage, run focused checks, review the diff, provide a commit message,
 and pause for review and a separate commit before beginning the next stage.
@@ -77,6 +78,41 @@ check that only an explicit successful capture result empties the cart and
 returns a successful checkout response.
 Run ``php tests/security/response-normalization.php`` to check transport/API
 errors, proxy envelopes, debug headers, and successful no-content responses.
+
+PayPal checkout bindings
+------------------------
+
+Browser order creation records the verified PayPal ID, purchase-unit references,
+amounts, currencies and reported payees in the WooCommerce-backed PPCP session.
+The binding includes merchant/app/environment context and the initiating account.
+Callbacks and cached address-prefill paths validate it before selecting a remote
+order or replacing session state. Both gateway processors check Store API supplied
+IDs against the same binding. Redirect callbacks use the existing bound session;
+AJAX capture also requires POST and the checkout nonce.
+
+A local payable order attaches only through its existing binding or WooCommerce's
+awaiting-payment/draft-order session. The association is saved as
+``_ae_ppcp_checkout_binding`` order metadata. Server patches must target bound
+purchase units and retain their payees; a successful patch advances expected
+amounts. Before capture/authorization, a fresh read verifies PayPal data and exact
+local totals. Returned payment data is checked before local completion work.
+Idempotency keys and operation locks continue to guard duplicate submissions.
+
+Bindings last at most three hours from the durable create-operation timestamp;
+recovering a create does not renew that deadline. A binding is never synthesized
+from a browser ID or legacy order metadata. Expired, lost or pre-update sessions
+fail closed. Check order/payment status before starting another attempt. Clearing
+the PPCP session also clears the binding. A guest checkout can continue through
+login when WooCommerce retains that session; a known account binding cannot move
+to another account. An active session can select only its current bound checkout.
+
+Run ``php tests/security/checkout-binding.php`` for callback, read/cache, gateway,
+local-order association, expiry/replay and mutation checks with stubbed WordPress
+and HTTP. Real classic/Blocks checkout, wallets, PayPal redirects, guest login,
+merchant/app changes, custom purchase-unit filters, split payments and multi-worker
+behavior still require staging validation. Fresh verification adds API reads;
+check wallet timing on supported devices. CartFlows/FunnelKit upsell authorization,
+subscription token exchanges and webhook reconciliation are separate audit work.
 
 Proxy request bodies
 --------------------
@@ -129,8 +165,9 @@ Run ``php tests/security/order-access.php`` and
 ``node tests/security/order-access.cjs`` to check access controls and pay-page
 form serialization in both source and production JavaScript. Validate account
 and guest links, email verification, wallet flows and custom templates in staging.
-Remote PayPal/local order mapping across capture and review callbacks remains a
-separate audit follow-up. Webhook handling is not configured or verified for this
+Browser capture and review callbacks now require the server-created PayPal
+checkout binding described below. Multi-account onboarding, CartFlows order
+authorization and subscription token-change callbacks remain separate audit items. Webhook handling is not configured or verified for this
 fork; no webhook listener/subscription has been added in this stage.
 
 Payment diagnostics

@@ -97,6 +97,12 @@ class WFOCU_Paypal_For_WC_Gateway_AngellEYE_PPCP extends WFOCU_Gateway {
             $cache = null;
             return null;
         }
+        try {
+            AngellEYE_PayPal_PPCP_Checkout_Binding::require_current($paypal_order_id, $this->payment_request);
+        } catch (Exception $ex) {
+            $cache = null;
+            return null;
+        }
         $checkout_details = null;
         if (class_exists('AngellEye_Session_Manager')) {
             $checkout_details = AngellEye_Session_Manager::get('paypal_transaction_details');
@@ -113,6 +119,12 @@ class WFOCU_Paypal_For_WC_Gateway_AngellEYE_PPCP extends WFOCU_Gateway {
             }
         }
         if (empty($checkout_details)) {
+            $cache = null;
+            return null;
+        }
+        try {
+            AngellEYE_PayPal_PPCP_Checkout_Binding::verify_response($paypal_order_id, $this->payment_request, json_decode(json_encode($checkout_details), true));
+        } catch (Exception $ex) {
             $cache = null;
             return null;
         }

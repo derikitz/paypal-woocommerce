@@ -49,6 +49,7 @@ if (class_exists('WC_Checkout')) {
                     if (!$order) {
                         throw new Exception(__('Unable to create order.', 'paypal-for-woocommerce'));
                     }
+                    WC()->session->set('order_awaiting_payment', $order_id);
                     do_action('woocommerce_checkout_order_processed', $order_id, $posted_data, $order);
                     if (apply_filters('woocommerce_cart_needs_payment', $order->needs_payment(), WC()->cart)) {
                         $this->process_order_payment($order_id, ($posted_data['payment_method'] ?? 'angelleye_ppcp'));

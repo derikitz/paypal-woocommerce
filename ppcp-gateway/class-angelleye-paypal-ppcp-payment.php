@@ -1,6 +1,7 @@
 <?php
 
 defined('ABSPATH') || exit;
+require_once __DIR__ . '/class-angelleye-paypal-ppcp-checkout-binding.php';
 
 if (!trait_exists('WC_PPCP_Pre_Orders_Trait')) {
     if (function_exists('angelleye_pfw_bootstrap_ppcp_runtime')) {
@@ -421,6 +422,7 @@ class AngellEYE_PayPal_PPCP_Payment {
             $args = apply_filters('angelleye_ppcp_request_args', $args, 'create_order', $woo_order_id);
             $this->api_response = $this->api_request->request($this->paypal_order_api, $args, 'create_order');
             if (!empty($this->api_response['status'])) {
+                AngellEYE_PayPal_PPCP_Checkout_Binding::remember($this->api_response, $args, $this, $woo_order_id, $operation->created_at());
                 $return_response = $this->add_nonce_in_response($return_response);
                 // Add currency code and total for the apple pay orders
                 $response = $this->ae_get_updated_checkout_payment_data((!empty($order) ? $order : null));
@@ -456,6 +458,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+            if ($ex instanceof AngellEYE_PayPal_PPCP_Checkout_Binding_Exception) {
+                wc_add_notice($ex->getMessage(), 'error');
+                wp_send_json_error(array('messages' => array($ex->getMessage())), 403);
+            }
         } finally {
             if ($operation) {
                 $operation->close();
@@ -1162,6 +1168,7 @@ class AngellEYE_PayPal_PPCP_Payment {
 
     public function angelleye_ppcp_get_checkout_details($paypal_order_id) {
         try {
+            AngellEYE_PayPal_PPCP_Checkout_Binding::require_current($paypal_order_id, $this);
             $args = array(
                 'timeout' => 60,
                 'redirection' => 5,
@@ -1172,6 +1179,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'cookies' => array()
             );
             $this->api_response = $this->api_request->request($this->paypal_order_api . $paypal_order_id, $args, 'get_order');
+            AngellEYE_PayPal_PPCP_Checkout_Binding::verify_response($paypal_order_id, $this, $this->api_response);
             $this->api_response = json_decode(json_encode($this->api_response), FALSE);
             AngellEye_Session_Manager::set('paypal_order_id', $paypal_order_id);
             AngellEye_Session_Manager::set('paypal_transaction_details', $this->api_response);
@@ -1256,6 +1264,7 @@ class AngellEYE_PayPal_PPCP_Payment {
 	public function angelleye_ppcp_order_capture_request($woo_order_id, $need_to_update_order = true) {
         $operation = null;
         try {
+            AngellEYE_PayPal_PPCP_Checkout_Binding::attach(AngellEye_Session_Manager::get('paypal_order_id'), $this, wc_get_order($woo_order_id));
             $operation = $this->begin_payment_operation($woo_order_id, 'capture_order', AngellEye_Session_Manager::get('paypal_order_id', ''));
             $order = wc_get_order($woo_order_id);
             if ($need_to_update_order && !$operation->has_been_submitted()) {
@@ -1265,6 +1274,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 }
             }
             $paypal_order_id = AngellEye_Session_Manager::get('paypal_order_id', false);
+            AngellEYE_PayPal_PPCP_Checkout_Binding::before_mutation($paypal_order_id, $this, $order);
             $args = array(
                 'method' => 'POST',
                 'timeout' => 60,
@@ -1275,6 +1285,9 @@ class AngellEYE_PayPal_PPCP_Payment {
             );
             $args['angelleye_payment_state'] = array($order->get_total(), $order->get_currency());
             $this->api_response = $this->api_request->request($this->paypal_order_api . $paypal_order_id . '/capture', $args, 'capture_order');
+            if (!AngellEYE_PayPal_PPCP_Response::is_error($this->api_response)) {
+                AngellEYE_PayPal_PPCP_Checkout_Binding::verify_response($paypal_order_id, $this, $this->api_response);
+            }
             $angelleye_ppcp_payment_method_title = $this->get_set_payment_method_title_from_session($woo_order_id);
             if (!empty($angelleye_ppcp_payment_method_title)) {
                 $order->set_payment_method_title($angelleye_ppcp_payment_method_title);
@@ -1500,6 +1513,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+            if ($ex instanceof AngellEYE_PayPal_PPCP_Checkout_Binding_Exception) {
+                wc_add_notice($ex->getMessage(), 'error');
+            }
+            return false;
         } finally {
             if ($operation) {
                 $operation->close();
@@ -1571,6 +1588,8 @@ class AngellEYE_PayPal_PPCP_Payment {
                     angelleye_session_expired_exception('_paypal_order_id missing in the update_order call.');
                 }
             }
+            AngellEYE_PayPal_PPCP_Checkout_Binding::attach($paypal_order_id, $this, $order);
+            AngellEYE_PayPal_PPCP_Checkout_Binding::verify_response($paypal_order_id, $this, $this->angelleye_ppcp_get_paypal_order($paypal_order_id));
             // Note: This could create issue with old orders where we don't have reference_id
             if (empty($reference_id)) {
                 $reference_id = angelleye_ppcp_get_post_meta($order_id, '_paypal_reference_id');
@@ -1721,6 +1740,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'value' => $intent
             );
             $patch_request = apply_filters('angelleye_ppcp_request_args', $patch_request, 'update_order', $order_id);
+            $updated_binding = AngellEYE_PayPal_PPCP_Checkout_Binding::prepare_update($paypal_order_id, $this, $order, $patch_request);
             $args = array(
                 'timeout' => 70,
                 'method' => 'PATCH',
@@ -1730,7 +1750,9 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'user-agent' => 'PPCP/' . VERSION_PFW,
             );
             $response = $this->api_request->request($this->paypal_order_api . $paypal_order_id, $args, 'update_order');
-            return !AngellEYE_PayPal_PPCP_Response::is_error($response);
+            if (AngellEYE_PayPal_PPCP_Response::is_error($response)) { return false; }
+            AngellEYE_PayPal_PPCP_Checkout_Binding::commit_update($updated_binding);
+            return true;
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
@@ -1923,6 +1945,7 @@ class AngellEYE_PayPal_PPCP_Payment {
     public function angelleye_ppcp_order_auth_request($woo_order_id) {
         $operation = null;
         try {
+            AngellEYE_PayPal_PPCP_Checkout_Binding::attach(AngellEye_Session_Manager::get('paypal_order_id'), $this, wc_get_order($woo_order_id));
             $operation = $this->begin_payment_operation($woo_order_id, 'authorize_order', AngellEye_Session_Manager::get('paypal_order_id', ''));
             $this->paymentaction = apply_filters('angelleye_ppcp_paymentaction', $this->paymentaction, $woo_order_id);
             $order = wc_get_order($woo_order_id);
@@ -1931,6 +1954,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 return false;
             }
             $paypal_order_id = AngellEye_Session_Manager::get('paypal_order_id');
+            AngellEYE_PayPal_PPCP_Checkout_Binding::before_mutation($paypal_order_id, $this, $order);
             $args = array(
                 'method' => 'POST',
                 'timeout' => 60,
@@ -1941,6 +1965,9 @@ class AngellEYE_PayPal_PPCP_Payment {
             );
             $args['angelleye_payment_state'] = array($order->get_total(), $order->get_currency());
             $this->api_response = $this->api_request->request($this->paypal_order_api . $paypal_order_id . '/authorize', $args, 'authorize_order');
+            if (!AngellEYE_PayPal_PPCP_Response::is_error($this->api_response)) {
+                AngellEYE_PayPal_PPCP_Checkout_Binding::verify_response($paypal_order_id, $this, $this->api_response);
+            }
             $angelleye_ppcp_payment_method_title = $this->get_set_payment_method_title_from_session($woo_order_id);
             if (!empty($angelleye_ppcp_payment_method_title)) {
                 $order->set_payment_method_title($angelleye_ppcp_payment_method_title);
@@ -2133,6 +2160,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+            if ($ex instanceof AngellEYE_PayPal_PPCP_Checkout_Binding_Exception) {
+                wc_add_notice($ex->getMessage(), 'error');
+            }
+            return false;
         } finally {
             if ($operation) {
                 $operation->close();
@@ -2234,6 +2265,7 @@ class AngellEYE_PayPal_PPCP_Payment {
     }
 
     public function angelleye_ppcp_update_woo_order_data($paypal_order_id) {
+        AngellEYE_PayPal_PPCP_Checkout_Binding::verify_local($paypal_order_id, $this, wc_get_order(angelleye_ppcp_get_awaiting_payment_order_id()));
         $this->checkout_details = $this->angelleye_ppcp_get_checkout_details($paypal_order_id);
         AngellEye_Session_Manager::set('paypal_transaction_details', $this->checkout_details);
         if (empty($this->checkout_details)) {
@@ -2648,6 +2680,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 ob_end_clean();
             }
             if (!empty($this->api_response['status'])) {
+                AngellEYE_PayPal_PPCP_Checkout_Binding::remember($this->api_response, $args, $this, $woo_order_id, $operation->created_at());
                 if (!empty(isset($woo_order_id) && !empty($woo_order_id))) {
                     $order->update_meta_data('_paypal_order_id', $this->api_response['id']);
                     $order->save();
@@ -2684,6 +2717,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+            if ($ex instanceof AngellEYE_PayPal_PPCP_Checkout_Binding_Exception) {
+                wc_add_notice($ex->getMessage(), 'error');
+                return array('result' => 'failure', 'redirect' => wc_get_checkout_url());
+            }
         } finally {
             if ($operation) {
                 $operation->close();

@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/class-angelleye-paypal-ppcp-checkout-binding.php';
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -184,6 +185,9 @@ class WC_Gateway_CC_AngellEYE extends WC_Payment_Gateway_CC {
             $angelleye_ppcp_paypal_order_id = !empty($_POST['paypal_order_id'])
                 ? wc_clean(wp_unslash($_POST['paypal_order_id']))
                 : AngellEye_Session_Manager::get('paypal_order_id');
+            if (!empty($angelleye_ppcp_paypal_order_id)) {
+                AngellEYE_PayPal_PPCP_Checkout_Binding::attach($angelleye_ppcp_paypal_order_id, $this->payment_request, wc_get_order($woo_order_id));
+            }
             if (!empty($_POST['paypal_order_id']) && !empty($angelleye_ppcp_paypal_order_id)) {
                 // Blocks carries the PayPal order id through paymentMethodData rather
                 // than the WC session. Downstream capture/update calls still read the
