@@ -166,6 +166,104 @@ class AngellEYE_PayPal_PPCP_Request {
         return $this->result;
     }
 
+    /** Obtain a server-only token, isolated by environment and app credentials. */
+    public static function get_access_token($is_sandbox, $client_id, $secret_id, $force_refresh = false) {
+        $error = new WP_Error('paypal_oauth_failed', 'Unable to authenticate with PayPal. Check the configured API credentials and connection.');
+        if (empty($client_id) || empty($secret_id)) {
+            return $error;
+        }
+        $cache_key = 'ae_ppcp_oauth_' . hash('sha256', wp_json_encode(array((bool) $is_sandbox, $client_id, $secret_id)));
+        if ($force_refresh) {
+            delete_transient($cache_key);
+        }
+        $cached = get_transient($cache_key);
+        if (is_array($cached) && !empty($cached['access_token']) && isset($cached['expires_at']) && $cached['expires_at'] > time()) {
+            return $cached['access_token'];
+        }
+
+        $token_url = $is_sandbox ? 'https://api-m.sandbox.paypal.com/v1/oauth2/token' : 'https://api-m.paypal.com/v1/oauth2/token';
+        $started_at = time();
+        // Do not send token exchanges through the payment response logger.
+        $response = wp_remote_post($token_url, array(
+            'timeout' => 60,
+            'redirection' => 0,
+            'sslverify' => true,
+            'headers' => array(
+                'Authorization' => 'Basic ' . base64_encode($client_id . ':' . $secret_id),
+                'Content-Type' => 'application/x-www-form-urlencoded',
+            ),
+            'body' => 'grant_type=client_credentials',
+        ));
+        if (is_wp_error($response) || 200 !== (int) wp_remote_retrieve_response_code($response)) {
+            return $error;
+        }
+        $token = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($token) || empty($token['access_token']) || !is_string($token['access_token']) ||
+            !isset($token['token_type'], $token['expires_in']) || !is_string($token['token_type']) ||
+            0 !== strcasecmp($token['token_type'], 'Bearer') || !is_numeric($token['expires_in']) || (int) $token['expires_in'] <= 0) {
+            return $error;
+        }
+        // Refresh early and account for time spent obtaining the token.
+        $remaining = $started_at + (int) $token['expires_in'] - time();
+        if ($remaining <= 0) {
+            return $error;
+        }
+        $ttl = $remaining - 60;
+        if ($ttl > 0) {
+            set_transient($cache_key, array('access_token' => $token['access_token'], 'expires_at' => time() + $ttl), $ttl);
+        }
+        return $token['access_token'];
+    }
+
+    private function direct_request($url, $args, $action_name) {
+        foreach (array_keys($args['headers'] ?? array()) as $header) {
+            if (in_array(strtolower($header), array('authorization', 'paypal-auth-assertion'), true)) {
+                unset($args['headers'][$header]);
+            }
+        }
+        $args['timeout'] = 60;
+        $args['user-agent'] = 'PFW_PPCP';
+        $args['sslverify'] = true;
+        $args['redirection'] = 0;
+
+        // ID tokens are obtained at the OAuth endpoint, not with an access token.
+        if ('generate_id_token' === $action_name && rtrim($url, '/') === $this->token_url) {
+            $body = isset($args['body']) && is_array($args['body']) ? $args['body'] : array();
+            $body['grant_type'] = 'client_credentials';
+            $body['response_type'] = 'id_token';
+            $args['headers']['Authorization'] = 'Basic ' . $this->basicAuth;
+            $args['headers']['Content-Type'] = 'application/x-www-form-urlencoded';
+            $args['body'] = http_build_query($body, '', '&');
+            return wp_remote_post($url, $args);
+        }
+
+        if (isset($args['body']) && is_array($args['body'])) {
+            $args['body'] = wp_json_encode($args['body']);
+        }
+        $token = self::get_access_token($this->is_sandbox, $this->client_id, $this->secret_id);
+        if (!is_wp_error($token)) {
+            $args['headers']['Authorization'] = 'Bearer ' . $token;
+            $response = wp_remote_get($url, $args);
+            // A rejected token may be revoked before its advertised expiry.
+            // Retry only an explicit 401, never an ambiguous payment timeout.
+            if (is_wp_error($response) || 401 !== (int) wp_remote_retrieve_response_code($response)) {
+                return $response;
+            }
+            $token = self::get_access_token($this->is_sandbox, $this->client_id, $this->secret_id, true);
+            if (!is_wp_error($token)) {
+                $args['headers']['Authorization'] = 'Bearer ' . $token;
+                return wp_remote_get($url, $args);
+            }
+        }
+        // Keep the existing parsed API response contract without exposing OAuth
+        // response bodies, credentials, or tokens through the payment logger.
+        return array(
+            'headers' => array(),
+            'response' => array('code' => 503),
+            'body' => wp_json_encode(array('name' => 'AUTHENTICATION_FAILURE', 'message' => $token->get_error_message())),
+        );
+    }
+
     public function request($url, $args, $action_name = 'default') {
 
 	    /**
@@ -204,19 +302,19 @@ class AngellEYE_PayPal_PPCP_Request {
 
         try {
             $this->angelleye_get_settings();
-            if (!str_contains($url, 'paypal.com')) {
+            $is_paypal_api = 'https' === wp_parse_url($url, PHP_URL_SCHEME) && in_array(wp_parse_url($url, PHP_URL_HOST),
+                array('api-m.paypal.com', 'api-m.sandbox.paypal.com', 'api.paypal.com', 'api.sandbox.paypal.com'), true);
+            if (!$is_paypal_api) {
                 $args['timeout'] = '60';
                 $args['user-agent'] = 'PFW_PPCP';
                 $this->result = wp_remote_get($url, $args);
             } else if ($this->is_first_party_used === 'yes') {
-                unset($args['headers']['Paypal-Auth-Assertion']);
-                $args['headers']['Authorization'] = ($action_name && $action_name === 'get_client_token') ? "Bearer " . $this->basicAuth : "Basic " . $this->basicAuth;
-                if (isset($args['body']) && is_array($args['body'])) {
-                    $args['body'] = wp_json_encode($args['body']);
+                $this->result = $this->direct_request($url, $args, $action_name);
+                if ('generate_id_token' === $action_name && rtrim($url, '/') === $this->token_url) {
+                    // OAuth responses contain server credentials (access tokens)
+                    // and must not pass through the payment-body logger.
+                    return is_wp_error($this->result) ? null : json_decode(wp_remote_retrieve_body($this->result), true);
                 }
-                $args['timeout'] = '60';
-                $args['user-agent'] = 'PFW_PPCP';
-                $this->result = wp_remote_get($url, $args);
             } else {
                 $args['timeout'] = '60';
                 $args['user-agent'] = 'PFW_PPCP';

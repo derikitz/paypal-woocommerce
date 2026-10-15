@@ -57,7 +57,9 @@ checks do not replace WordPress integration and sandbox tests. Focused standalon
 regression checks live under ``tests/``; run the add-on authorization check with
 ``php tests/security/addon-installation.php``. Run the proxy TLS check with
 ``php tests/security/proxy-tls.php``; its HTTP layer is stubbed and makes no
-network requests.
+network requests. Run ``php tests/security/direct-oauth.php`` to check direct
+merchant authentication, token caching, refresh limits, and partner routing with
+stubbed HTTP and transient storage.
 
 Before deploying payment changes, verify the affected success and failure paths,
 including permissions/nonces for administrative actions, and capture failures,

@@ -885,7 +885,10 @@ if (!function_exists('angelleye_ppcp_account_ready_to_paid')) {
         } else {
             $paypal_order_api = 'https://api-m.paypal.com/v2/checkout/orders/';
         }
-        $basicAuth = base64_encode($client_id . ":" . $secret_id);
+        $access_token = AngellEYE_PayPal_PPCP_Request::get_access_token($is_sandbox, $client_id, $secret_id);
+        if (is_wp_error($access_token)) {
+            return false;
+        }
         $data = array(
             'intent' => 'CAPTURE',
             'purchase_units' =>
@@ -921,7 +924,9 @@ if (!function_exists('angelleye_ppcp_account_ready_to_paid')) {
             'cookies' => array(),
             'body' => wp_json_encode($data)
         );
-        $args['headers']['Authorization'] = "Basic " . $basicAuth;
+        $args['headers']['Authorization'] = 'Bearer ' . $access_token;
+        $args['redirection'] = 0;
+        $args['sslverify'] = true;
         $result = wp_remote_post($paypal_order_api, $args);
         $body = wp_remote_retrieve_body($result);
         $response = !empty($body) ? json_decode($body, true) : '';
