@@ -2,6 +2,16 @@
 
 defined('ABSPATH') || exit;
 
+if (!trait_exists('WC_PPCP_Pre_Orders_Trait')) {
+    if (function_exists('angelleye_pfw_bootstrap_ppcp_runtime')) {
+        angelleye_pfw_bootstrap_ppcp_runtime();
+    }
+
+    if (!trait_exists('WC_PPCP_Pre_Orders_Trait') && defined('PAYPAL_FOR_WOOCOMMERCE_PLUGIN_DIR')) {
+        include_once PAYPAL_FOR_WOOCOMMERCE_PLUGIN_DIR . '/ppcp-gateway/pre-order/trait-wc-ppcp-pre-orders.php';
+    }
+}
+
 class AngellEYE_PayPal_PPCP_Payment {
 
     use WC_PPCP_Pre_Orders_Trait;
@@ -336,7 +346,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                     $shipping_country = $order->get_billing_country();
                 }
                 $shipping_country = strtoupper($shipping_country);
-                if ($order->needs_shipping_address() || WC()->cart->needs_shipping()) {
+                if (($order->needs_shipping_address() || WC()->cart->needs_shipping()) && !angelleye_ppcp_is_local_pickup_chosen($order)) {
                     if (!empty($shipping_first_name) && !empty($shipping_last_name)) {
                         $body_request['purchase_units'][0]['shipping']['name']['full_name'] = $shipping_first_name . ' ' . $shipping_last_name;
                     }
@@ -356,7 +366,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                     }
                 }
             } else {
-                if (true === WC()->cart->needs_shipping()) {
+                if (true === WC()->cart->needs_shipping() && !angelleye_ppcp_is_local_pickup_chosen()) {
                     if (!empty($cart['shipping_address']['first_name']) && !empty($cart['shipping_address']['last_name'])) {
                         $body_request['purchase_units'][0]['shipping']['name']['full_name'] = $cart['shipping_address']['first_name'] . ' ' . $cart['shipping_address']['last_name'];
                     }
@@ -374,7 +384,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 }
             }
             if ($this->angelleye_ppcp_used_payment_method === 'venmo') {
-                if (is_user_logged_in()) {
+                if (is_user_logged_in() && !angelleye_ppcp_is_local_pickup_chosen()) {
                     if (!empty($cart['shipping_address']['first_name']) && !empty($cart['shipping_address']['last_name'])) {
                         $body_request['purchase_units'][0]['shipping']['name']['full_name'] = $cart['shipping_address']['first_name'] . '' . $cart['shipping_address']['last_name'];
                     }
@@ -464,10 +474,14 @@ class AngellEYE_PayPal_PPCP_Payment {
         if (!empty($order)) {
             $details = $this->getOrderLineItems($order);
             $totalAmount = $order->get_total('');
-            $shippingRequired = $order->needs_shipping_address();
+            $shippingRequired = $order->needs_shipping_address() && !angelleye_ppcp_is_local_pickup_chosen($order);
         } elseif (isset(WC()->cart)) {
+            // At wp_enqueue_scripts WooCommerce has not calculated totals yet,
+            // so get_total() returns the stale pre-tax session figure - which
+            // the wallet sheet then asks the buyer to approve.
+            WC()->cart->calculate_totals();
             $totalAmount = WC()->cart->get_total('');
-            $shippingRequired = WC()->cart->needs_shipping();
+            $shippingRequired = WC()->cart->needs_shipping() && !angelleye_ppcp_is_local_pickup_chosen();
             $details = $this->getCartLineItems();
         }
         return [
@@ -893,11 +907,17 @@ class AngellEYE_PayPal_PPCP_Payment {
     }
 
     public function angelleye_ppcp_shipping_preference() {
+        // Local Pickup short-circuits to NO_SHIPPING on every entry point.
+        // Avoids passing a shipping address that would bind the seller to free
+        // shipping under PayPal Seller Protection.
+        if (angelleye_ppcp_is_local_pickup_chosen()) {
+            return 'NO_SHIPPING';
+        }
         $shipping_preference = 'GET_FROM_FILE';
         $page = null;
         if (isset($_GET) && !empty($_GET['from'])) {
             $page = $_GET['from'];
-        } elseif (is_cart() && !WC()->cart->is_empty()) {
+        } elseif (is_cart() && WC()->cart && !WC()->cart->is_empty()) {
             $page = 'cart';
         } elseif (is_checkout() || is_checkout_pay_page()) {
             $page = 'checkout';
@@ -1045,12 +1065,21 @@ class AngellEYE_PayPal_PPCP_Payment {
                     }
                     break;
                 case 'INVALID_REQUEST':
+                    $has_description = false;
                     foreach ($error['details'] as $e) {
                         if (isset($e['field']) && isset($e['description'])) {
                             $message .= "\t" . $e['field'] . "\n\t" . $e['description'] . "\n\n";
+                            $has_description = true;
                         } elseif (isset($e['issue'])) {
-                            $message .= "\t" . $e['issue'] . "n\n";
+                            $message .= "\t" . $e['issue'] . "\n\n";
                         }
+                    }
+                    // When PayPal only returns a generic issue code (e.g.
+                    // UNKNOWN_VALIDATION) with no field/description, the issue
+                    // code alone is useless to the buyer. Prepend the
+                    // top-level message so they get something actionable.
+                    if (!$has_description && !empty($error['message'])) {
+                        $message = $error['message'] . "\n" . $message;
                     }
                     break;
                 case 'BUSINESS_ERROR':
@@ -1069,8 +1098,13 @@ class AngellEYE_PayPal_PPCP_Payment {
             $message = $error['message'];
         } else if (!empty($error['error_description'])) {
             $message = $error['error_description'];
+        } else if (is_scalar($error)) {
+            $message = (string) $error;
         } else {
-            $message = $error;
+            // $error can be an array or object of an unexpected shape. Assigning
+            // it straight to $message raised "Array to string conversion" and put
+            // the literal text "Array" in order notes and error emails.
+            $message = !empty($error) ? wc_print_r($error, true) : '';
         }
         if ($this->error_email_notification) {
             $this->angelleye_ppcp_error_email_notification($error_email_notification_param, $message);
@@ -1259,7 +1293,13 @@ class AngellEYE_PayPal_PPCP_Payment {
                 $order->update_meta_data('_paypal_order_id', $this->api_response['id']);
                 $order->save_meta_data();
                 if ($this->api_response['status'] == 'COMPLETED') {
-                    if (isset($this->api_response['payment_source']['card']['attributes']['vault']['status']) && 'APPROVED' === $this->api_response['payment_source']['card']['attributes']['vault']['status']) {
+                    // vault.status = APPROVED only carries a setup_token for the
+                    // explicit setup-token vaulting flow. Some capture responses
+                    // come back with vault.status = APPROVED but no setup_token
+                    // (and no vault id) - there is nothing to exchange. Guard on
+                    // setup_token so we don't POST to /v3/vault/payment-tokens
+                    // with an empty id, which only triggers a failed API call.
+                    if (!empty($this->api_response['payment_source']['card']['attributes']['vault']['setup_token']) && isset($this->api_response['payment_source']['card']['attributes']['vault']['status']) && 'APPROVED' === $this->api_response['payment_source']['card']['attributes']['vault']['status']) {
                         $setup_token = $this->api_response['payment_source']['card']['attributes']['vault']['setup_token'];
                         $body_request = array();
                         $body_request['payment_source']['token'] = array(
@@ -1314,6 +1354,19 @@ class AngellEYE_PayPal_PPCP_Payment {
                         $card_response_order_note .= "\n";
                         $card_response_order_note .= 'Card type : ' . angelleye_ppcp_readable($payment_source['card']['type']);
                         $order->add_order_note($card_response_order_note);
+                    }
+                    if (!empty($payment_source['venmo'])) {
+                        $venmo_response_order_note = __('Venmo Details', 'paypal-for-woocommerce');
+                        if (!empty($payment_source['venmo']['user_name'])) {
+                            $venmo_response_order_note .= "\n" . 'Username : ' . $payment_source['venmo']['user_name'];
+                        }
+                        if (!empty($payment_source['venmo']['email_address'])) {
+                            $venmo_response_order_note .= "\n" . 'Email : ' . $payment_source['venmo']['email_address'];
+                        }
+                        if (!empty($payment_source['venmo']['payer_id'])) {
+                            $venmo_response_order_note .= "\n" . 'Payer ID : ' . $payment_source['venmo']['payer_id'];
+                        }
+                        $order->add_order_note($venmo_response_order_note);
                     }
                     foreach ($this->api_response['purchase_units'] as $captures_key => $captures) {
                         
@@ -1407,6 +1460,9 @@ class AngellEYE_PayPal_PPCP_Payment {
                         wc_add_notice(__('Unfortunately your order cannot be processed as the originating bank/merchant has declined your transaction. Please attempt your purchase again.', 'paypal-for-woocommerce'), 'error');
                         return false;
                     } else {
+                        // PENDING / non-final capture: defer status to angelleye_ppcp_update_woo_order_status,
+                        // which sets on-hold with the PayPal pending reason. Avoid an extra update_status('on-hold')
+                        // that would only flap the status and produce duplicate transition notes.
                         if ($this->payment_complete === count($this->api_response['purchase_units'])) {
                             $order->payment_complete($transaction_id);
                         } else {
@@ -1419,6 +1475,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                     $order->save();
                     $order->add_order_note(sprintf(__('%s Capture Transaction ID: %s', 'paypal-for-woocommerce'), $angelleye_ppcp_payment_method_title, $transaction_id));
                     $order->add_order_note('Seller Protection Status: ' . angelleye_ppcp_readable($seller_protection));
+                    $this->angelleye_ppcp_maybe_trigger_gzd_order_confirmation($order);
                     return true;
                 } else {
                     return false;
@@ -1637,7 +1694,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 $shipping_country = $order->get_billing_country();
             }
             $shipping_country = strtoupper($shipping_country);
-            if ($order->needs_shipping_address() || WC()->cart->needs_shipping()) {
+            if (($order->needs_shipping_address() || WC()->cart->needs_shipping()) && !angelleye_ppcp_is_local_pickup_chosen($order)) {
                 if (!empty($shipping_first_name) && !empty($shipping_last_name)) {
                     $purchase_units['shipping']['name']['full_name'] = $shipping_first_name . ' ' . $shipping_last_name;
                 }
@@ -1902,7 +1959,13 @@ class AngellEYE_PayPal_PPCP_Payment {
                 }
                 $payment_status = $this->api_response['purchase_units']['0']['payments']['authorizations']['0']['status'] ?? '';
                 if ($this->api_response['status'] == 'COMPLETED' && strtolower($payment_status) != "denied") {
-                    if (isset($this->api_response['payment_source']['card']['attributes']['vault']['status']) && 'APPROVED' === $this->api_response['payment_source']['card']['attributes']['vault']['status']) {
+                    // vault.status = APPROVED only carries a setup_token for the
+                    // explicit setup-token vaulting flow. Some capture responses
+                    // come back with vault.status = APPROVED but no setup_token
+                    // (and no vault id) - there is nothing to exchange. Guard on
+                    // setup_token so we don't POST to /v3/vault/payment-tokens
+                    // with an empty id, which only triggers a failed API call.
+                    if (!empty($this->api_response['payment_source']['card']['attributes']['vault']['setup_token']) && isset($this->api_response['payment_source']['card']['attributes']['vault']['status']) && 'APPROVED' === $this->api_response['payment_source']['card']['attributes']['vault']['status']) {
                         $setup_token = $this->api_response['payment_source']['card']['attributes']['vault']['setup_token'];
                         $body_request = array();
                         $body_request['payment_source']['token'] = array(
@@ -1951,6 +2014,19 @@ class AngellEYE_PayPal_PPCP_Payment {
                         $card_response_order_note .= "\n";
                         $card_response_order_note .= 'Card type : ' . angelleye_ppcp_readable($payment_source['card']['type']);
                         $order->add_order_note($card_response_order_note);
+                    }
+                    if (!empty($payment_source['venmo'])) {
+                        $venmo_response_order_note = __('Venmo Details', 'paypal-for-woocommerce');
+                        if (!empty($payment_source['venmo']['user_name'])) {
+                            $venmo_response_order_note .= "\n" . 'Username : ' . $payment_source['venmo']['user_name'];
+                        }
+                        if (!empty($payment_source['venmo']['email_address'])) {
+                            $venmo_response_order_note .= "\n" . 'Email : ' . $payment_source['venmo']['email_address'];
+                        }
+                        if (!empty($payment_source['venmo']['payer_id'])) {
+                            $venmo_response_order_note .= "\n" . 'Payer ID : ' . $payment_source['venmo']['payer_id'];
+                        }
+                        $order->add_order_note($venmo_response_order_note);
                     }
                     $processor_response = $this->api_response['purchase_units']['0']['payments']['authorizations']['0']['processor_response'] ?? '';
                     if (!empty($processor_response['avs_code'])) {
@@ -2026,6 +2102,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                         $order->add_order_note(__('Payment authorized. Change payment status to processing or complete to capture funds.', 'paypal-for-woocommerce'));
                     }
                     $order->save();
+                    $this->angelleye_ppcp_maybe_trigger_gzd_order_confirmation($order);
                     return true;
                 } else {
                     $response_code = __('Processor authorization status: ', 'paypal-for-woocommerce');
@@ -2521,7 +2598,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                     $shipping_country = $order->get_billing_country();
                 }
                 $shipping_country = strtoupper($shipping_country);
-                if ($order->needs_shipping_address() || WC()->cart->needs_shipping()) {
+                if (($order->needs_shipping_address() || WC()->cart->needs_shipping()) && !angelleye_ppcp_is_local_pickup_chosen($order)) {
                     if (!empty($shipping_first_name) && !empty($shipping_last_name)) {
                         $body_request['purchase_units'][0]['shipping']['name']['full_name'] = $shipping_first_name . ' ' . $shipping_last_name;
                     }
@@ -2536,7 +2613,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                     );
                 }
             } else {
-                if (true === WC()->cart->needs_shipping()) {
+                if (true === WC()->cart->needs_shipping() && !angelleye_ppcp_is_local_pickup_chosen()) {
                     if (is_user_logged_in()) {
                         if (!empty($cart['shipping_address']['first_name']) && !empty($cart['shipping_address']['last_name'])) {
                             $body_request['purchase_units'][0]['shipping']['name']['full_name'] = $cart['shipping_address']['first_name'] . ' ' . $cart['shipping_address']['last_name'];
@@ -2652,9 +2729,11 @@ class AngellEYE_PayPal_PPCP_Payment {
             }
             $order = wc_get_order($orderid);
             $angelleye_ppcp_payment_method_title = $this->get_payment_method_title_for_order($orderid);
-            $_paypal_order_id = angelleye_ppcp_get_post_meta($order, '_paypal_order_id');
-            $respnse = $this->angelleye_ppcp_get_paypal_order($_paypal_order_id);
-            $payment_status = isset($respnse['status']) ? $respnse['status'] : $payment_status;
+            // Trust the caller's $payment_status (capture- or auth-level enum). The previous
+            // refetch overrode it with the PayPal Order-level status, which can be COMPLETED
+            // while the capture itself is still PENDING (e.g. RECEIVING_PREFERENCE_MANDATES_MANUAL_ACTION) —
+            // that mismatch wrongly routed pending captures into the COMPLETED branch and called
+            // payment_complete() against funds that were not yet settled.
             switch (strtoupper($payment_status)) :
                 case 'COMPLETED' :
                     $order->payment_complete();
@@ -2865,7 +2944,7 @@ class AngellEYE_PayPal_PPCP_Payment {
         }
     }
 
-    public function angelleye_ppcp_multi_account_refund_order_third_party($order_id, $value, $testmode) {
+    public function angelleye_ppcp_multi_account_refund_order_third_party($order_id, $value, $testmode, $amount = null, $reason = '') {
         $operation = null;
         try {
             $operation = $this->begin_payment_operation($order_id, 'refund_order', $value['transaction_id'] ?? '');
@@ -2880,7 +2959,19 @@ class AngellEYE_PayPal_PPCP_Payment {
             }
             $order = wc_get_order($order_id);
             $reason = !empty($reason) ? $reason : 'Refund';
+            if (strlen($reason) > 255) {
+                $reason = substr($reason, 0, 252) . '...';
+            }
             $body_request['note_to_payer'] = $reason;
+            $decimals = $this->angelleye_ppcp_get_number_of_decimal_digits();
+            // Omitting `amount` makes PayPal refund the entire capture, so it must only
+            // ever be left out when the caller genuinely asked for a full refund.
+            if (!empty($amount) && $amount > 0) {
+                $body_request['amount'] = array(
+                    'value' => angelleye_ppcp_round($amount, $decimals),
+                    'currency_code' => apply_filters('angelleye_ppcp_woocommerce_currency', angelleye_ppcp_get_currency($order_id), $amount)
+                );
+            }
             $args = array(
                 'method' => 'POST',
                 'timeout' => 60,
@@ -2892,19 +2983,20 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'cookies' => array()
             );
             $this->api_response = $this->api_request->request($paypal_refund_api . $transaction_id . '/refund', $args, 'refund_order');
+            $currency_code = angelleye_ppcp_get_currency($order_id);
             if (isset($this->api_response['status']) && $this->api_response['status'] == "COMPLETED") {
                 $gross_amount = isset($this->api_response['seller_payable_breakdown']['gross_amount']['value']) ? $this->api_response['seller_payable_breakdown']['gross_amount']['value'] : '';
                 $refund_transaction_id = isset($this->api_response['id']) ? $this->api_response['id'] : '';
                 $order->add_order_note(
-                        sprintf(__('Refunded %1$s - Refund ID: %2$s', 'paypal-for-woocommerce'), $gross_amount, $refund_transaction_id)
+                        sprintf(__('Refunded %1$s - Refund ID: %2$s', 'paypal-for-woocommerce'), wc_price($gross_amount, array('currency' => $currency_code)), $refund_transaction_id)
                 );
-            } else if (isset($$this->api_response['status']) && $$this->api_response['status'] == "PENDING") {
-                $gross_amount = isset($$this->api_response['seller_payable_breakdown']['gross_amount']['value']) ? $$this->api_response['seller_payable_breakdown']['gross_amount']['value'] : '';
-                $refund_transaction_id = isset($$this->api_response['id']) ? $$this->api_response['id'] : '';
-                $pending_reason_text = isset($$this->api_response['status_details']['reason']) ? $$this->api_response['status_details']['reason'] : '';
+            } else if (isset($this->api_response['status']) && $this->api_response['status'] == "PENDING") {
+                $gross_amount = isset($this->api_response['seller_payable_breakdown']['gross_amount']['value']) ? $this->api_response['seller_payable_breakdown']['gross_amount']['value'] : '';
+                $refund_transaction_id = isset($this->api_response['id']) ? $this->api_response['id'] : '';
+                $pending_reason_text = isset($this->api_response['status_details']['reason']) ? $this->api_response['status_details']['reason'] : '';
                 $order->add_order_note(sprintf(__('Payment via %s Pending. Pending reason: %s.', 'paypal-for-woocommerce'), $order->get_payment_method_title(), $pending_reason_text));
                 $order->add_order_note(
-                        sprintf(__('Refund Amount %1$s - Refund ID: %2$s', 'paypal-for-woocommerce'), $gross_amount, $refund_transaction_id)
+                        sprintf(__('Refund Amount %1$s - Refund ID: %2$s', 'paypal-for-woocommerce'), wc_price($gross_amount, array('currency' => $currency_code)), $refund_transaction_id)
                 );
             } else {
                 if ($this->paymentaction === 'authorize' && !empty($this->api_response['details'][0]['issue']) && 'INVALID_RESOURCE_ID' === $this->api_response['details'][0]['issue']) {
@@ -2969,6 +3061,47 @@ class AngellEYE_PayPal_PPCP_Payment {
             $body_request = angelleye_ppcp_remove_empty_key($capture_arg);
             $body_request['final_capture'] = $final_capture;
             $authorization_id = angelleye_ppcp_get_post_meta($order, '_auth_transaction_id');
+            // FunnelKit upsells are always captured immediately (separate PayPal order with CAPTURE intent).
+            // Exclude upsell items/amounts from the parent authorization capture to avoid MAX_CAPTURE_AMOUNT_EXCEEDED.
+            $upsell_payments = $order->get_meta('_angelleye_wfocu_ppcp_upsell_payments', true);
+            $upsell_captured_total = 0;
+            if (!empty($upsell_payments) && is_array($upsell_payments)) {
+                foreach ($upsell_payments as $upsell) {
+                    $upsell_item_ids = $upsell['order_item_ids'] ?? [];
+                    $upsell_amount = floatval($upsell['amount'] ?? 0);
+                    // Remove upsell items from parent capture line items
+                    if (!empty($upsell_item_ids)) {
+                        foreach ($upsell_item_ids as $item_id) {
+                            unset($order_data['refund_line_total'][$item_id]);
+                        }
+                    } elseif ($upsell_amount > 0) {
+                        // Fallback: order_item_ids empty — track amount to subtract from parent
+                        $upsell_captured_total += $upsell_amount;
+                    }
+                }
+                // Recalculate parent capture amount from remaining items
+                $remaining_amount = 0;
+                foreach ($order_data['refund_line_total'] as $item_amount) {
+                    if (!empty($item_amount)) {
+                        $remaining_amount += floatval($item_amount);
+                    }
+                }
+                // If order_item_ids were empty, subtract upsell amounts from remaining
+                if ($upsell_captured_total > 0 && $remaining_amount > 0) {
+                    $remaining_amount -= $upsell_captured_total;
+                    if ($remaining_amount < 0) {
+                        $remaining_amount = 0;
+                    }
+                }
+                if ($remaining_amount <= 0) {
+                    // All items were upsell items — no parent capture needed
+                    $order->add_order_note(__('All items are FunnelKit upsells already captured. No parent authorization capture needed.', 'paypal-for-woocommerce'));
+                    return;
+                }
+                // Update parent capture amount to only cover remaining (non-upsell) items
+                $amount_value = wc_format_decimal($remaining_amount, wc_get_price_decimals());
+                $body_request['amount']['value'] = $amount_value;
+            }
             $args = array(
                 'method' => 'POST',
                 'timeout' => 60,
@@ -3169,7 +3302,12 @@ class AngellEYE_PayPal_PPCP_Payment {
     public function angelleye_ppcp_add_payment_source_parameter($request) {
         try {
             $payment_method_name = '';
+            $payment_method_id = AngellEye_Session_Manager::get('payment_method_id', '');
             $angelleye_ppcp_used_payment_method = AngellEye_Session_Manager::get('used_payment_method', 'paypal');
+            // This is to fix the tokenization issue for card payments as the payment method id is same for both paypal and card payments in PPCP plugin, so we need to check the used payment method to set the correct payment source parameter for card payments
+            if ($payment_method_id == 'angelleye_ppcp_cc') {
+                $angelleye_ppcp_used_payment_method = 'card';
+            }
             if (!empty($angelleye_ppcp_used_payment_method)) {
                 $payment_method_name = '';
                 $billing_address = array();
@@ -3222,7 +3360,13 @@ class AngellEYE_PayPal_PPCP_Payment {
                         break;
                     case 'venmo':
                         $payment_method_name = 'venmo';
-                        $attributes = array('vault' => array('store_in_vault' => 'ON_SUCCESS', 'usage_type' => 'MERCHANT', 'permit_multiple_payment_tokens ' => true));
+                        // Note: the key here has a (now-removed) trailing space
+                        // historically — PayPal silently dropped it as an
+                        // unrecognized property, defaulting permit_multiple to
+                        // false, so a returning Venmo buyer kept getting fresh
+                        // vault ids instead of additional tokens under one
+                        // customer. Matches the paypal / apple_pay branches.
+                        $attributes = array('vault' => array('store_in_vault' => 'ON_SUCCESS', 'usage_type' => 'MERCHANT', 'permit_multiple_payment_tokens' => true));
                         $paypal_generated_customer_id = $this->ppcp_payment_token->angelleye_ppcp_get_paypal_generated_customer_id($this->is_sandbox);
                         if (!empty($paypal_generated_customer_id)) {
                             $attributes['customer'] = array('id' => $paypal_generated_customer_id);
@@ -3239,6 +3383,16 @@ class AngellEYE_PayPal_PPCP_Payment {
                         unset($request['application_context']);
                         break;
                     case 'apple_pay':
+                        // Vaulting the order under stored_credential RECURRING
+                        // while the wallet hands back a one-time token makes
+                        // PayPal reject applepay.confirmOrder(), which surfaces
+                        // to the buyer as an opaque "unable to process your
+                        // request". The browser owns that decision, so mirror
+                        // it here instead of inheriting the broader
+                        // save-payment-method rules the outer gate applies.
+                        if (!angelleye_ppcp_is_apple_pay_recurring_token()) {
+                            break;
+                        }
                         $payment_method_name = 'apple_pay';
                         $attributes = array('vault' => array('store_in_vault' => 'ON_SUCCESS', 'usage_type' => 'MERCHANT', 'permit_multiple_payment_tokens' => true));
                         // If existing PayPal Customer ID is available then add it so that PayPal can add new payment method to same user account.
@@ -3344,7 +3498,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                     }
                 }
             }
-            if ($order->needs_shipping_address()) {
+            if ($order->needs_shipping_address() && !angelleye_ppcp_is_local_pickup_chosen($order)) {
                 if ($order->has_shipping_address()) {
                     $shipping_first_name = $order->get_shipping_first_name();
                     $shipping_last_name = $order->get_shipping_last_name();
@@ -3510,6 +3664,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                         $order->save();
                         $order->add_order_note(sprintf(__('%s Capture Transaction ID: %s', 'paypal-for-woocommerce'), $angelleye_ppcp_payment_method_title, $transaction_id));
                         $order->add_order_note('Seller Protection Status: ' . angelleye_ppcp_readable($seller_protection));
+                        $this->angelleye_ppcp_maybe_trigger_gzd_order_confirmation($order);
                         return true;
                     } else {
                         $processor_response = $this->api_response['purchase_units']['0']['payments']['authorizations']['0']['processor_response'] ?? '';
@@ -3588,6 +3743,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                         if ($this->is_auto_capture_auth) {
                             $order->add_order_note(__('Payment authorized. Change payment status to processing or complete to capture funds.', 'paypal-for-woocommerce'));
                         }
+                        $this->angelleye_ppcp_maybe_trigger_gzd_order_confirmation($order);
                         return true;
                     }
                 } else {
@@ -3764,7 +3920,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 );
             }
         } catch (Exception $ex) {
-            
+
         }
     }
 
@@ -4188,6 +4344,12 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'expiry' => $posted_card->exp_year . '-' . $posted_card->exp_month,
                 'name' => $name
             );
+            // PayPal v3 vault setup-tokens validates the card; the security
+            // code is effectively required for setup-tokens-with-card or PayPal
+            // returns the generic UNKNOWN_VALIDATION with no field detail.
+            if (!empty($posted_card->cvc)) {
+                $body_request['payment_source']['card']['security_code'] = $posted_card->cvc;
+            }
             if (!empty($country) && !empty($postcode) && !empty($city)) {
                 $body_request['payment_source']['card']['billing_address'] = array(
                     'address_line_1' => $address_1,
@@ -4198,17 +4360,20 @@ class AngellEYE_PayPal_PPCP_Payment {
                     'country_code' => $country
                 );
             }
-            $body_request['payment_source']['card']['verification_method'] = 'SCA_WHEN_REQUIRED';
+            // Do NOT send `verification_method` on /v3/vault/setup-tokens with
+            // a card source. The `SCA_WHEN_REQUIRED` enum is documented for
+            // /v2/checkout/orders' payment_source.card; the setup-tokens
+            // schema rejects it and PayPal returns INVALID_REQUEST →
+            // UNKNOWN_VALIDATION with no `field` / `description`. Verified
+            // via live sandbox test 2026-05-01 — removing this single line
+            // turned the same request from 400 INVALID_REQUEST into a
+            // successful setup-token response.
+            // $body_request['payment_source']['card']['verification_method'] = 'SCA_WHEN_REQUIRED';
             $body_request['payment_source']['card']['experience_context'] = array(
                 'brand_name' => $this->brand_name,
                 'locale' => 'en-US',
                 'return_url' => add_query_arg(array('angelleye_ppcp_action' => 'advanced_credit_card_create_payment_token_free_signup_with_free_trial', 'utm_nooverride' => '1', 'customer_id' => get_current_user_id(), 'order_id' => $order_id), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
                 'cancel_url' => wc_get_checkout_url()
-            );
-            $body_request['payment_source']['card']['stored_credential'] = array(
-                'payment_initiator' => 'CUSTOMER',
-                'payment_type' => 'UNSCHEDULED',
-                'usage' => 'SUBSEQUENT'
             );
             $paypal_generated_customer_id = $this->ppcp_payment_token->angelleye_ppcp_get_paypal_generated_customer_id($this->is_sandbox);
             if (!empty($paypal_generated_customer_id)) {
@@ -4291,18 +4456,28 @@ class AngellEYE_PayPal_PPCP_Payment {
                     'country_code' => $country
                 );
             }
-            $body_request['payment_source']['card']['verification_method'] = 'SCA_WHEN_REQUIRED';
+            // Do NOT send `verification_method` on /v3/vault/setup-tokens with
+            // a card source — see the matching note in
+            // angelleye_ppcp_advanced_credit_card_setup_tokens_free_signup_with_free_trial.
+            // PayPal rejects the call with INVALID_REQUEST → UNKNOWN_VALIDATION.
+            // $body_request['payment_source']['card']['verification_method'] = 'SCA_WHEN_REQUIRED';
             $body_request['payment_source']['card']['experience_context'] = array(
                 'brand_name' => $this->brand_name,
                 'locale' => 'en-US',
                 'return_url' => add_query_arg(array('angelleye_ppcp_action' => 'advanced_credit_card_create_payment_token_sub_change_payment', 'utm_nooverride' => '1', 'customer_id' => get_current_user_id(), 'order_id' => $order_id), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
                 'cancel_url' => wc_get_checkout_url()
             );
-            $body_request['payment_source']['card']['stored_credential'] = array(
-                'payment_initiator' => 'CUSTOMER',
-                'payment_type' => 'UNSCHEDULED',
-                'usage' => 'SUBSEQUENT'
-            );
+            // Do NOT send `stored_credential` on /v3/vault/setup-tokens. It is
+            // a /v2/checkout/orders field; the setup-tokens schema for
+            // payment_source.card does not accept it and PayPal rejects the
+            // call with INVALID_REQUEST → UNKNOWN_VALIDATION. The merchant-
+            // initiated recurring intent is conveyed at exchange / capture
+            // time, not on setup-token creation.
+            // $body_request['payment_source']['card']['stored_credential'] = array(
+            //     'payment_initiator' => 'CUSTOMER',
+            //     'payment_type' => 'UNSCHEDULED',
+            //     'usage' => 'SUBSEQUENT'
+            // );
             $paypal_generated_customer_id = $this->ppcp_payment_token->angelleye_ppcp_get_paypal_generated_customer_id($this->is_sandbox);
             if (!empty($paypal_generated_customer_id)) {
                 $body_request['customer']['id'] = $paypal_generated_customer_id;
@@ -5127,5 +5302,55 @@ class AngellEYE_PayPal_PPCP_Payment {
             return 'pre-ordered';
         }
         return $this->paymentstatus === 'wc-default' ? strtolower($payment_status) : $this->paymentstatus;
+    }
+
+    /**
+     * Fire WooCommerce Germanized's order confirmation trigger after a successful
+     * capture/authorization. Germanized unhooks WC's default customer-processing-order
+     * email triggers (see WC_GZD_Email_Customer_Processing_Order::__construct) and
+     * suppresses the customer-on-hold email when instant order confirmation is enabled,
+     * so orders that finish in 'on-hold' (e.g. PENDING captures) never receive a
+     * customer email through WC's default status-transition path. This explicit trigger
+     * lets Germanized's confirm_order() flow run; Germanized itself guards against
+     * duplicate sends via did_action('woocommerce_germanized_order_confirmation_sent').
+     */
+    public function angelleye_ppcp_maybe_trigger_gzd_order_confirmation($order) {
+        if (!is_a($order, 'WC_Order')) {
+            return;
+        }
+        if (!function_exists('wc_gzd_send_instant_order_confirmation')) {
+            return;
+        }
+        // Persistent dedup. did_action() only catches duplicates within the
+        // same PHP request, but PFW reaches this method from four separate
+        // call sites and the redirect-style PayPal flow splits across two
+        // requests (process_payment → PayPal → regular_capture), so we need
+        // a flag that survives across requests. Also covers the case where
+        // Germanized's own checkout-step confirm_order somehow runs (status
+        // change firing the email despite prevent_confirmation_email_sending,
+        // or a third-party plugin invoking the action) — in either of those
+        // we record that it was sent and skip our explicit trigger.
+        if ('yes' === $order->get_meta('_angelleye_ppcp_gzd_confirmation_sent')) {
+            return;
+        }
+        if (did_action('woocommerce_germanized_order_confirmation_sent')) {
+            // Someone (Germanized's normal flow, an earlier PFW call site)
+            // already fired the confirmation in this request. Mark it so
+            // we don't fire again — even from a future request.
+            $order->update_meta_data('_angelleye_ppcp_gzd_confirmation_sent', 'yes');
+            $order->save();
+            return;
+        }
+        // Germanized fires its own trigger as
+        //   do_action('woocommerce_gzd_order_confirmation', $order, $order->get_id());
+        // and registers WC_GZD_Emails::trigger_order_confirmation_emails($order, $order_id)
+        // as the handler with accepted_args = 2. WC's send_transactional_email
+        // forwards whatever args we pass to the *_notification dispatcher, so
+        // we must mirror Germanized's own signature (order first, then id) —
+        // passing only the order produced "Too few arguments to function
+        // trigger_order_confirmation_emails()" on the client's site.
+        do_action('woocommerce_gzd_order_confirmation', $order, $order->get_id());
+        $order->update_meta_data('_angelleye_ppcp_gzd_confirmation_sent', 'yes');
+        $order->save();
     }
 }

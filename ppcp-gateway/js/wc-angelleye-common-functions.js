@@ -1,6 +1,8 @@
 const angelleyeOrder = {
     productAddToCart: true,
     ppcp_address: [],
+    ppcpCcSubmitHookReady: false,
+    ppcpCcSubmitRecoveryTimer: null,
     isCheckoutPage: () => {
         return 'checkout' === angelleye_ppcp_manager.page;
     },
@@ -73,6 +75,33 @@ const angelleyeOrder = {
     getConstantValue: (constantName, defaultValue) => {
         return angelleye_ppcp_manager.constants && angelleye_ppcp_manager.constants[constantName] ? angelleye_ppcp_manager.constants[constantName] : defaultValue;
     },
+    isPpcpCcSubmitHookReady: () => {
+        return angelleyeOrder.ppcpCcSubmitHookReady === true;
+    },
+    setPpcpCcSubmitHookReady: (isReady) => {
+        angelleyeOrder.ppcpCcSubmitHookReady = isReady === true;
+    },
+    stopPpcpCcSubmitWatchdog: () => {
+        if (angelleyeOrder.ppcpCcSubmitRecoveryTimer) {
+            clearTimeout(angelleyeOrder.ppcpCcSubmitRecoveryTimer);
+            angelleyeOrder.ppcpCcSubmitRecoveryTimer = null;
+        }
+    },
+    clearPpcpCcSubmittingState: (checkoutSelector) => {
+        angelleyeOrder.stopPpcpCcSubmitWatchdog();
+        if (checkoutSelector && jQuery(checkoutSelector).length) {
+            jQuery(checkoutSelector).removeClass('processing paypal_cc_submiting');
+        }
+        angelleyeOrder.hideProcessingSpinner();
+    },
+    startPpcpCcSubmitWatchdog: (checkoutSelector) => {
+        angelleyeOrder.stopPpcpCcSubmitWatchdog();
+        angelleyeOrder.ppcpCcSubmitRecoveryTimer = setTimeout(() => {
+            if (checkoutSelector && jQuery(checkoutSelector).length && jQuery(checkoutSelector).hasClass('paypal_cc_submiting') && !jQuery(checkoutSelector).hasClass('createOrder')) {
+                angelleyeOrder.clearPpcpCcSubmittingState(checkoutSelector);
+            }
+        }, 8000);
+    },
     getCheckoutSelectorCss: () => {
         let checkoutSelector = '.woocommerce';
         if (angelleyeOrder.isCheckoutPage()) {
@@ -125,15 +154,85 @@ const angelleyeOrder = {
             return data.orderID;
         });
     },
+    ppcp_block_mode: false,
+    blockCreateOrderError: null,
+    // The #angelleye_ppcp_cc-card-number DOM node the SDK Card Fields were
+    // last mounted into, and the timestamp of that render() call. Used by
+    // renderHostedButtons to detect whether a (possibly still-in-flight)
+    // mount already ran for the current container, so an updated_checkout
+    // / payment_method_selected burst can't stack a duplicate set of
+    // card-field iframes. The timestamp lets a later call distinguish an
+    // in-flight render from one that silently failed, so a stuck mount
+    // doesn't leave the customer with empty containers forever.
+    hostedFieldsContainer: null,
+    hostedFieldsRenderedAt: 0,
+    /**
+     * Drives the PPCP-CC card-fields submit pipeline for WooCommerce Blocks
+     * and returns a Promise that the Blocks onPaymentSetup subscriber awaits.
+     *   - Resolves with the PayPal order id when the SDK onApprove event
+     *     fires (after 3DS / card validation completes).
+     *   - Rejects with an Error when create_order / SDK / validation surface
+     *     a failure, so the Blocks subscriber returns ERROR and Blocks clears
+     *     the spinner and shows the message.
+     * After the promise resolves, the Blocks subscriber returns SUCCESS with
+     * the order id inside paymentMethodData; Blocks then POSTs the full
+     * Blocks checkout payload (including all custom fields and extensions)
+     * to /wc/store/v1/checkout, which routes through process_payment() for
+     * the actual capture.
+     */
+    runBlocksPpcpCcFlow: () => {
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            angelleyeOrder.ppcp_block_mode = true;
+            angelleyeOrder.blockCreateOrderError = null;
+            const cleanup = () => {
+                jQuery(document.body).off('angelleye_ppcp_cc_approved.ppcpBlocks', approvalHandler);
+                jQuery(document.body).off('angelleye_ppcp_cc_error.ppcpBlocks', errorHandler);
+                angelleyeOrder.ppcp_block_mode = false;
+                angelleyeOrder.blockCreateOrderError = null;
+            };
+            const approvalHandler = (e, data) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(data && data.paypalOrderId);
+            };
+            const errorHandler = (e, errData) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                const err = new Error((errData && errData.message) || 'PayPal card payment failed');
+                // Preserve the failure context so the Blocks subscriber can
+                // decide where to display the notice (top of form vs inline
+                // next to the payment method).
+                err.context = (errData && errData.context) || null;
+                reject(err);
+            };
+            jQuery(document.body).on('angelleye_ppcp_cc_approved.ppcpBlocks', approvalHandler);
+            jQuery(document.body).on('angelleye_ppcp_cc_error.ppcpBlocks', errorHandler);
+            jQuery(document.body).trigger('submit_paypal_cc_form');
+        });
+    },
     createOrder: ({angelleye_ppcp_button_selector, billingDetails, shippingDetails, apiUrl, errorLogId, callback}) => {
+        // Detect FunnelKit sliding cart buttons — they should always submit cart context, not product/page context.
+        let fkcartSelectors = ['#angelleye_ppcp_fkcart', '#angelleye_ppcp_fkcart_apple_pay', '#angelleye_ppcp_fkcart_google_pay'];
+        let is_from_fkcart = fkcartSelectors.indexOf(angelleye_ppcp_button_selector) > -1;
         if (typeof apiUrl == 'undefined') {
             apiUrl = angelleye_ppcp_manager.create_order_url;
+            if (is_from_fkcart) {
+                // Force from=cart so server reads WC()->cart directly instead of treating as product/checkout request
+                apiUrl = apiUrl.replace(/([?&])from=[^&]*/, '$1from=cart');
+                if (apiUrl.indexOf('from=') === -1) {
+                    apiUrl += (apiUrl.indexOf('?') > -1 ? '&' : '?') + 'from=cart';
+                }
+            }
         }
         let formSelector = angelleyeOrder.getWooFormSelector();
         angelleyeOrder.removeError();
         let formData;
         let is_from_checkout = angelleyeOrder.isCheckoutPage();
-        let is_from_product = angelleyeOrder.isProductPage();
+        // FKCart buttons should never be treated as product page even if rendered on a product page
+        let is_from_product = is_from_fkcart ? false : angelleyeOrder.isProductPage();
         let billingField = null;
         let shippingField = null;
         if (billingDetails) {
@@ -151,19 +250,66 @@ const angelleyeOrder = {
             });
         }
         let topCheckoutSelectors = ['#angelleye_ppcp_checkout_top', '#angelleye_ppcp_checkout_top_google_pay', '#angelleye_ppcp_checkout_top_apple_pay'];
-        if (is_from_checkout && angelleye_ppcp_manager.is_pay_page !== 'yes' && topCheckoutSelectors.indexOf(angelleye_ppcp_button_selector) > -1) {
-            formData = '';
+        let checkoutSource = null;
+        let is_from_block_checkout = angelleyeOrder.ppcp_block_mode === true;
+        if (is_from_block_checkout && angelleye_ppcp_manager.is_pay_page !== 'yes') {
+            checkoutSource = 'block_checkout';
+        } else if (is_from_checkout) {
+            checkoutSource = topCheckoutSelectors.indexOf(angelleye_ppcp_button_selector) > -1 ? 'checkout_top' : 'checkout_regular';
+        }
+        if (is_from_block_checkout && angelleye_ppcp_manager.is_pay_page !== 'yes') {
+            // WooCommerce Blocks pre-flight. Server only needs enough data
+            // to build a PayPal order against the cart (customer address so
+            // the PayPal order carries shipping/billing). All order-level
+            // validation, custom fields and extensions flow through the
+            // Store API /wc/store/v1/checkout POST that Blocks fires after
+            // the subscriber resolves.
+            let paymentMethodTitle = jQuery('#angelleye_ppcp_payment_method_title').val() || 'paypal';
+            formData = 'angelleye_ppcp_checkout_source=block_checkout';
+            formData += '&payment_method=angelleye_ppcp_cc';
+            formData += '&angelleye_ppcp_payment_method_title=' + encodeURIComponent(paymentMethodTitle);
+            formData += '&woocommerce-process-checkout-nonce=' + angelleye_ppcp_manager.woocommerce_process_checkout;
+            if (angelleyeOrder.ppcp_address !== null && angelleyeOrder.ppcp_address !== undefined && angelleyeOrder.ppcp_address !== '') {
+                formData += '&address=' + encodeURIComponent(JSON.stringify(angelleyeOrder.ppcp_address));
+            }
+        } else if (is_from_checkout && angelleye_ppcp_manager.is_pay_page !== 'yes' && topCheckoutSelectors.indexOf(angelleye_ppcp_button_selector) > -1) {
+            formData = 'angelleye_ppcp_checkout_source=' + encodeURIComponent(checkoutSource);
+        } else if (is_from_fkcart) {
+            // FunnelKit sliding cart — server reads existing WC()->cart contents, no form serialization needed
+            formData = 'angelleye_ppcp_payment_method_title=' + jQuery('#angelleye_ppcp_payment_method_title').val();
+            formData += '&woocommerce-process-checkout-nonce=' + angelleye_ppcp_manager.woocommerce_process_checkout;
+            // Forward the address details (e.g. Google Pay / Apple Pay shipping-address-update
+            // callbacks) so the server can recalculate shipping against the existing cart —
+            // without appending angelleye_ppcp-add-to-cart, which would re-add the product and
+            // double the total for an item already in the sliding cart.
+            if (billingDetails) {
+                formData += '&billing_address_source=' + encodeURIComponent(JSON.stringify(billingDetails));
+            }
+            if (shippingDetails) {
+                formData += '&shipping_address_source=' + encodeURIComponent(JSON.stringify(shippingDetails));
+            }
+            if (angelleyeOrder.ppcp_address !== null && angelleyeOrder.ppcp_address !== undefined && angelleyeOrder.ppcp_address !== '') {
+                formData += '&address=' + JSON.stringify(angelleyeOrder.ppcp_address);
+            }
         } else {
             if (is_from_product) {
+                // Always re-add on every click. The server's product branch
+                // handles re-add idempotently (empties cart then re-adds), so
+                // skipping the re-add on the second click — as the old
+                // one-shot flag did — left retries with no add-to-cart
+                // signal and surfaced a spurious "session has expired" error
+                // whenever the first click hit validation and never actually
+                // populated the cart.
                 jQuery(formSelector).find('input[name=angelleye_ppcp-add-to-cart]').remove();
-                if (angelleyeOrder.productAddToCart) {
-                    jQuery('<input>', {
-                        type: 'hidden',
-                        name: 'angelleye_ppcp-add-to-cart',
-                        value: jQuery("[name='add-to-cart']").val()
-                    }).appendTo(formSelector);
-                    angelleyeOrder.productAddToCart = false;
-                }
+                jQuery('<input>', {
+                    type: 'hidden',
+                    name: 'angelleye_ppcp-add-to-cart',
+                    value: jQuery("[name='add-to-cart']").val()
+                }).appendTo(formSelector);
+                // Keep the flag flip so the angelleye_paypal_oncancel handler
+                // still knows the PPCP flow started and can clean up cart
+                // items on cancel.
+                angelleyeOrder.productAddToCart = false;
             }
             if (billingField) {
                 jQuery(formSelector).find('input[name=billing_address_source]').remove();
@@ -174,6 +320,12 @@ const angelleyeOrder = {
                 shippingField.appendTo(formSelector);
             }
             formData = jQuery(formSelector).serialize();
+            if (is_from_product) {
+                // Product pages can expose duplicated variation inputs via
+                // plugins/themes — dedupe before sending so PHP's $_POST
+                // doesn't receive an empty override of the selected value.
+                formData = angelleyeOrder.dedupeFormBody(formData);
+            }
             if (formData === '') {
                 formData = 'angelleye_ppcp_payment_method_title=' + jQuery('#angelleye_ppcp_payment_method_title').val();
                 if (angelleyeOrder.ppcp_address !== null && angelleyeOrder.ppcp_address !== undefined && angelleyeOrder.ppcp_address !== '') {
@@ -183,6 +335,9 @@ const angelleyeOrder = {
                 if (angelleyeOrder.ppcp_address !== null && angelleyeOrder.ppcp_address !== undefined && angelleyeOrder.ppcp_address !== '') {
                     formData += "&woocommerce-process-checkout-nonce=" + angelleye_ppcp_manager.woocommerce_process_checkout + "&address=" + JSON.stringify(angelleyeOrder.ppcp_address);
                 }
+            }
+            if (checkoutSource !== null) {
+                formData += '&angelleye_ppcp_checkout_source=' + encodeURIComponent(checkoutSource);
             }
         }
         angelleyeJsErrorLogger.addToLog(errorLogId, {
@@ -257,8 +412,26 @@ const angelleyeOrder = {
             return Promise.resolve({result: 'redirect', redirect});
         }
     },
-    shippingAddressUpdate: (shippingDetails, billingDetails, errorLogId) => {
-        return angelleyeOrder.createOrder({apiUrl: angelleye_ppcp_manager.shipping_update_url, shippingDetails, billingDetails, errorLogId});
+    /**
+     * Flag whether the wallet address should override the posted checkout
+     * fields when the order is built.
+     */
+    setWalletAddressAuthoritative: (isAuthoritative) => {
+        let formSelector = angelleyeOrder.getWooFormSelector();
+        jQuery(formSelector).find('input[name=angelleye_ppcp_wallet_address_authoritative]').remove();
+        if (isAuthoritative) {
+            jQuery('<input>', {
+                type: 'hidden',
+                name: 'angelleye_ppcp_wallet_address_authoritative',
+                value: '1'
+            }).appendTo(formSelector);
+        }
+    },
+    shippingAddressUpdate: (shippingDetails, billingDetails, errorLogId, angelleye_ppcp_button_selector) => {
+        // Forward the button selector so createOrder keeps the sliding-cart (FKCart) context.
+        // Without it the shipping update is treated as a product-page buy-now and re-adds the
+        // product, doubling the cart total for an item already present in the sliding cart.
+        return angelleyeOrder.createOrder({angelleye_ppcp_button_selector, apiUrl: angelleye_ppcp_manager.shipping_update_url, shippingDetails, billingDetails, errorLogId});
     },
     triggerPaymentCancelEvent: () => {
         jQuery(document.body).trigger('angelleye_paypal_oncancel');
@@ -288,25 +461,61 @@ const angelleyeOrder = {
         jQuery(errorMessageLocation).find('.input-text, select, input:checkbox').trigger('validate').trigger('blur');
         angelleyeOrder.scrollToWooCommerceNoticesSection();
     },
-    showProcessingSpinner: (containerSelector) => {
-        if (typeof containerSelector === 'undefined') {
+    resolveProcessingContainerSelector: (containerSelector) => {
+        if (typeof containerSelector === 'undefined' || !containerSelector) {
             containerSelector = '.woocommerce';
         }
+
+        if (jQuery(containerSelector).length && jQuery(containerSelector).is(':visible')) {
+            return containerSelector;
+        }
+
+        const fallbackSelectors = [
+            '.woocommerce-checkout',
+            '.woocommerce',
+            '#customer_details, .woocommerce-checkout-review-order',
+            'form.checkout'
+        ];
+
+        for (let i = 0; i < fallbackSelectors.length; i++) {
+            if (jQuery(fallbackSelectors[i]).length) {
+                return fallbackSelectors[i];
+            }
+        }
+
+        return containerSelector;
+    },
+    showProcessingSpinner: (containerSelector) => {
         if (jQuery('.wp-block-woocommerce-checkout-fields-block').length) {
             jQuery('.wp-block-woocommerce-checkout-fields-block #contact-fields, .wp-block-woocommerce-checkout-fields-block #billing-fields, .wp-block-woocommerce-checkout-fields-block #payment-method').block({message: null, overlayCSS: {background: '#fff', opacity: 0.6}});
-        } else if (jQuery(containerSelector).length) {
-            jQuery(containerSelector).block({message: null, overlayCSS: {background: '#fff', opacity: 0.6}});
+        } else {
+            const blockTarget = angelleyeOrder.resolveProcessingContainerSelector(containerSelector);
+            if (jQuery(blockTarget).length) {
+                jQuery(blockTarget).block({message: null, overlayCSS: {background: '#fff', opacity: 0.6}});
+            }
         }
 
     },
     hideProcessingSpinner: (containerSelector) => {
-        if (typeof containerSelector === 'undefined') {
-            containerSelector = '.woocommerce';
-        }
         if (jQuery('.wp-block-woocommerce-checkout-fields-block').length) {
             jQuery('.wc-block-components-checkout-place-order-button, .wp-block-woocommerce-checkout-fields-block #contact-fields, .wp-block-woocommerce-checkout-fields-block #billing-fields, .wp-block-woocommerce-checkout-fields-block #payment-method').unblock();
-        } else if (jQuery(containerSelector).length) {
-            jQuery(containerSelector).unblock();
+        } else {
+            const unblockTargets = [
+                angelleyeOrder.resolveProcessingContainerSelector(containerSelector),
+                '.woocommerce',
+                '.woocommerce-checkout',
+                '#customer_details, .woocommerce-checkout-review-order',
+                'form.checkout',
+                '.woocommerce-checkout-payment',
+                '.woocommerce-checkout-review-order-table',
+                '#order_review'
+            ];
+
+            unblockTargets.forEach((selector) => {
+                if (selector && jQuery(selector).length) {
+                    jQuery(selector).unblock();
+                }
+            });
         }
 
     },
@@ -330,6 +539,62 @@ const angelleyeOrder = {
         if (angelleyeOrder.isCheckoutPage() === false) {
             //  window.location.href = window.location.href;
         }
+    },
+    parsePayPalSdkError: (error) => {
+        let message = '';
+        let debugId = '';
+        let issueCode = '';
+
+        if (typeof error === 'string') {
+            message = error;
+        } else if (error && typeof error === 'object') {
+            if (Array.isArray(error.details) && error.details.length > 0) {
+                issueCode = error.details[0].issue || '';
+                message = error.details[0].description || error.details[0].issue || '';
+            }
+            message = message || error.message || error.name || '';
+            debugId = error.debug_id || error.debugId || error.paypalDebugId || '';
+        }
+
+        // Sometimes PayPal SDK sends JSON payload as part of error.message text.
+        if (!debugId && typeof message === 'string' && message.indexOf('{') > -1) {
+            try {
+                const payload = JSON.parse(message.substring(message.indexOf('{')));
+                if (!debugId) {
+                    debugId = payload.debug_id || '';
+                }
+                if (!issueCode && Array.isArray(payload.details) && payload.details.length > 0) {
+                    issueCode = payload.details[0].issue || '';
+                }
+                if (!message || message === error.message) {
+                    message = payload.message || message;
+                }
+                if (Array.isArray(payload.details) && payload.details.length > 0 && payload.details[0].description) {
+                    message = payload.details[0].description;
+                }
+            } catch (e) {
+                // keep original message
+            }
+        }
+
+        const normalizedMessage = (message || '').toLowerCase();
+        const normalizedIssueCode = (issueCode || '').toLowerCase();
+        const genericIssueCodes = ['unprocessable_entity', 'instrument_declined'];
+        const hasGenericMessage = normalizedMessage === 'unprocessable_entity' || normalizedMessage === 'instrument_declined' || normalizedMessage.indexOf('returned status 422') > -1;
+        const hasGenericIssueCode = genericIssueCodes.indexOf(normalizedIssueCode) > -1;
+
+        if (hasGenericMessage || hasGenericIssueCode) {
+            message = wp.i18n.__('We could not process this card. Please check card details or try another payment method.', 'paypal-for-woocommerce');
+        }
+
+        if (!message) {
+            message = localizedMessages.general_error_message;
+        }
+        if (debugId) {
+            message += ' [PayPal Debug ID: ' + debugId + ']';
+        }
+
+        return '<li>' + message + '</li>';
     },
     isCardFieldEligible: () => {
         if (angelleyeOrder.isCheckoutPage()) {
@@ -400,6 +665,44 @@ const angelleyeOrder = {
 
         return payment_method_element_selector;
     },
+    /**
+     * Deduplicate a URL-encoded form body by key, preferring non-empty
+     * values. Some variable-product pages (WC variations alongside
+     * plugins like WooCommerce Advanced Product Fields / gtm4wp / theme
+     * mirror forms) cause jQuery.serialize() to emit each field twice,
+     * with one copy populated and the other empty. PHP's $_POST uses
+     * last-value-wins, which picks the empty copy and fails WC's
+     * variation-attribute validation with "Invalid value posted for X".
+     */
+    dedupeFormBody: (formData) => {
+        if (!formData || typeof formData !== 'string') {
+            return formData;
+        }
+        const parts = formData.split('&');
+        const indexByKey = {};
+        const result = [];
+        for (const part of parts) {
+            if (!part) continue;
+            const eq = part.indexOf('=');
+            const key = eq >= 0 ? part.substring(0, eq) : part;
+            const val = eq >= 0 ? part.substring(eq + 1) : '';
+            if (Object.prototype.hasOwnProperty.call(indexByKey, key)) {
+                const existingIdx = indexByKey[key];
+                const existing = result[existingIdx];
+                const existingEq = existing.indexOf('=');
+                const existingVal = existingEq >= 0 ? existing.substring(existingEq + 1) : '';
+                // Replace only when the first copy is empty and the later
+                // copy has a value; otherwise keep the first occurrence.
+                if (existingVal === '' && val !== '') {
+                    result[existingIdx] = part;
+                }
+            } else {
+                indexByKey[key] = result.length;
+                result.push(part);
+            }
+        }
+        return result.join('&');
+    },
     setPaymentMethodSelector: (paymentMethod) => {
         let payment_method_element_selector = angelleyeOrder.getWooFormSelector();
         var element = document.querySelector(payment_method_element_selector);
@@ -423,27 +726,32 @@ const angelleyeOrder = {
             if (typeof angelleye_paypal_sdk === 'undefined') {
                 return;
             }
+            // Use FunnelKit Sliding Cart specific style props for FKCart button
+            let isFkcartButton = (angelleye_ppcp_button_selector === '#angelleye_ppcp_fkcart');
+            let styleSource = (isFkcartButton && angelleye_ppcp_manager.fkcart_style) ? angelleye_ppcp_manager.fkcart_style : angelleye_ppcp_manager;
             let angelleye_ppcp_style = {
-                layout: angelleye_ppcp_manager.style_layout,
-                color: angelleye_ppcp_manager.style_color,
-                shape: angelleye_ppcp_manager.style_shape,
-                label: angelleye_ppcp_manager.style_label
+                layout: styleSource.style_layout,
+                color: styleSource.style_color,
+                shape: styleSource.style_shape,
+                label: styleSource.style_label
             };
-            if (angelleye_ppcp_manager.style_height !== '') {
-                angelleye_ppcp_style['height'] = parseInt(angelleye_ppcp_manager.style_height);
+            if (styleSource.style_height !== '') {
+                angelleye_ppcp_style['height'] = parseInt(styleSource.style_height);
             }
-            if (angelleye_ppcp_manager.style_layout !== 'vertical') {
-                angelleye_ppcp_style['tagline'] = (angelleye_ppcp_manager.style_tagline === 'yes') ? true : false;
+            if (styleSource.style_layout !== 'vertical') {
+                angelleye_ppcp_style['tagline'] = (styleSource.style_tagline === 'yes') ? true : false;
             }
             let errorLogId = null;
-            angelleye_paypal_sdk.Buttons({
-                style: angelleye_ppcp_style,
+            let buttonCallbacks = {
                 createOrder: function (data, actions) {
                     errorLogId = angelleyeJsErrorLogger.generateErrorId();
+                    angelleyeOrder.showProcessingSpinner();
                     angelleyeJsErrorLogger.addToLog(errorLogId, 'PayPal Smart Button Payment Started');
                     return angelleyeOrder.createSmartButtonOrder({
                         angelleye_ppcp_button_selector, errorLogId
-                    })
+                    }).finally(() => {
+                        angelleyeOrder.hideProcessingSpinner();
+                    });
                 },
                 onApprove: function (data, actions) {
                     angelleyeOrder.showProcessingSpinner();
@@ -459,7 +767,59 @@ const angelleyeOrder = {
                 onError: function (err) {
                     angelleyeOrder.handleCreateOrderError(err, errorLogId);
                 }
-            }).render(angelleye_ppcp_button_selector);
+            };
+
+            // FunnelKit Sliding Cart with disabled funding methods: render each enabled funding source
+            // explicitly so we can hide specific methods (e.g. card) without affecting other PFW buttons
+            // on the same page (which all share the same global SDK load).
+            let fkcartDisabled = (isFkcartButton && angelleye_ppcp_manager.fkcart_style && Array.isArray(angelleye_ppcp_manager.fkcart_style.disable_funding))
+                ? angelleye_ppcp_manager.fkcart_style.disable_funding
+                : [];
+
+            if (isFkcartButton && fkcartDisabled.length > 0) {
+                // Funding sources to render in vertical order. Apple/Google Pay are rendered separately below.
+                let fundingSources = ['paypal', 'venmo', 'paylater', 'card', 'credit'];
+                // Allowed style colors per PayPal SDK validation
+                let allowedColors = {
+                    paypal:   ['gold', 'blue', 'silver', 'white', 'black'],
+                    venmo:    ['blue', 'silver', 'black', 'white'],
+                    paylater: ['gold', 'blue', 'silver', 'white', 'black'],
+                    card:     ['black', 'white', 'silver'],
+                    credit:   ['darkblue', 'blue']
+                };
+                let renderedAny = false;
+                fundingSources.forEach(function(src) {
+                    if (fkcartDisabled.indexOf(src) > -1) {
+                        return;
+                    }
+                    if (!angelleye_paypal_sdk.FUNDING || !angelleye_paypal_sdk.FUNDING[src.toUpperCase()]) {
+                        return;
+                    }
+                    // Per-source style: clone and adjust color/label to satisfy SDK validation
+                    let srcStyle = Object.assign({}, angelleye_ppcp_style);
+                    if (allowedColors[src] && allowedColors[src].indexOf(srcStyle.color) === -1) {
+                        srcStyle.color = allowedColors[src][0];
+                    }
+                    if (src === 'venmo' || src === 'card' || src === 'credit') {
+                        delete srcStyle.label;
+                    }
+                    let btn = angelleye_paypal_sdk.Buttons(Object.assign({
+                        style: srcStyle,
+                        fundingSource: angelleye_paypal_sdk.FUNDING[src.toUpperCase()]
+                    }, buttonCallbacks));
+                    if (btn.isEligible()) {
+                        btn.render(angelleye_ppcp_button_selector);
+                        renderedAny = true;
+                    }
+                });
+                if (!renderedAny) {
+                    // Fallback to default auto-rendering if no funding source was eligible
+                    angelleye_paypal_sdk.Buttons(Object.assign({style: angelleye_ppcp_style}, buttonCallbacks)).render(angelleye_ppcp_button_selector);
+                }
+            } else {
+                // Default rendering: single Buttons() call that auto-renders all eligible funding sources
+                angelleye_paypal_sdk.Buttons(Object.assign({style: angelleye_ppcp_style}, buttonCallbacks)).render(angelleye_ppcp_button_selector);
+            }
         });
         if (angelleyeOrder.isApplePayEnabled()) {
             jQuery.each(angelleye_ppcp_manager.apple_pay_btn_selector, function (key, angelleye_ppcp_apple_button_selector) {
@@ -533,40 +893,136 @@ const angelleyeOrder = {
     },
     renderHostedButtons: () => {
         if (typeof angelleye_paypal_sdk === 'undefined') {
+            angelleyeOrder.setPpcpCcSubmitHookReady(false);
             return;
         }
         let checkoutSelector = angelleyeOrder.getCheckoutSelectorCss();
         if (jQuery(checkoutSelector).is('.CardFields')) {
             return false;
         }
+        // updated_checkout swaps in a fresh review-order fragment: the
+        // .CardFields class on the form survives, but the card-field
+        // containers become brand-new empty nodes, and renderPaymentButtons
+        // clears the class (its iframe-count check) so we re-mount. The race
+        // that duplicates the fields: CardFields().render() appends its
+        // iframe asynchronously, so a second event (another updated_checkout
+        // / payment_method_selected) can fire while the first mount is still
+        // in flight — the iframe is not in the DOM yet, the class gets
+        // cleared again, and a second set is mounted into the same node.
+        //
+        // Guard on the container node identity *and* the iframe presence:
+        //   - iframe already in the node → mounted, bail.
+        //   - no iframe yet but render() was called very recently → still
+        //     in flight, bail (preventing the duplicate-mount race).
+        //   - no iframe and the render call is older than the grace window
+        //     → the previous mount silently failed (SDK glitch, hidden
+        //     container at render time, etc.); fall through and retry,
+        //     otherwise the customer is stuck with empty containers.
+        // A node replaced by a fresh fragment (updated_checkout) is always
+        // a different reference, so re-renders into a new container always
+        // proceed.
+        const cardNumberContainer = document.getElementById('angelleye_ppcp_cc-card-number');
+        if (cardNumberContainer && angelleyeOrder.hostedFieldsContainer === cardNumberContainer) {
+            const hasIframe = cardNumberContainer.querySelector('iframe') !== null;
+            const renderedAt = angelleyeOrder.hostedFieldsRenderedAt || 0;
+            const stillInFlight = (Date.now() - renderedAt) < 2000;
+            if (hasIframe || stillInFlight) {
+                return false;
+            }
+        }
         if (angelleyeOrder.isCCPaymentMethodSelected() === false) {
+            angelleyeOrder.setPpcpCcSubmitHookReady(false);
+            return false;
+        }
+        // At $0 cart the CC gateway renders WooCommerce's legacy plain-text
+        // card form (see WC_Gateway_CC_AngellEYE::angelleye_ppcp_cc_form),
+        // because the existing free-trial flow reads raw card data from
+        // $_POST and forwards it to /v3/vault/setup-tokens to vault the
+        // card for future renewals. Mounting SDK Card Fields iframes on
+        // top of those same DOM ids would tokenize the card client-side
+        // and break the submission. We let the checkout submit normally
+        // and the server-side trait flow handles vaulting.
+        if (parseFloat(angelleye_ppcp_manager.cart_total) <= 0) {
+            angelleyeOrder.setPpcpCcSubmitHookReady(false);
             return false;
         }
         let spinnerSelectors = checkoutSelector;
         jQuery(checkoutSelector).addClass('CardFields');
         let errorLogId = null;
+        let isItApiError = false;
         const cardFields = angelleye_paypal_sdk.CardFields({
             createOrder: function (data, actions) {
+                isItApiError = false;
                 jQuery('.woocommerce-NoticeGroup-checkout, .woocommerce-error, .woocommerce-message').remove();
                 if (!jQuery(checkoutSelector).hasClass('createOrder')) {
                     errorLogId = angelleyeJsErrorLogger.generateErrorId();
                     angelleyeJsErrorLogger.addToLog(errorLogId, 'Advanced CC Payment Started');
                     jQuery(checkoutSelector).addClass('createOrder');
                     return angelleyeOrder.createOrder({errorLogId}).then(function (data) {
+                        angelleyeOrder.stopPpcpCcSubmitWatchdog();
                         return data.orderID;
                     }).catch((error) => {
-                        angelleyeOrder.showError(error);
+                        angelleyeOrder.hideProcessingSpinner(spinnerSelectors);
+                        angelleyeOrder.stopPpcpCcSubmitWatchdog();
+                        isItApiError = true;
+                        // Reset hosted-card submit state so user can retry createOrder on next click.
+                        jQuery(checkoutSelector).removeClass('processing paypal_cc_submiting createOrder');
+                        if (angelleyeOrder.ppcp_block_mode) {
+                            // Stash the server-side message so onError can surface it to the
+                            // Blocks subscriber instead of the generic SDK error.
+                            angelleyeOrder.blockCreateOrderError = (typeof error === 'string')
+                                ? error.replace(/<[^>]+>/g, '').trim()
+                                : (error && error.message) || 'PayPal card payment failed';
+                        } else {
+                            angelleyeOrder.showError(error);
+                        }
                         return '';
                     });
                 }
             },
             onApprove: function (data, actions) {
                 if (data.orderID) {
+                    if (angelleyeOrder.ppcp_block_mode) {
+                        // Blocks-native flow: hand the PayPal order id to the
+                        // runBlocksPpcpCcFlow promise. The Blocks subscriber will
+                        // then return SUCCESS with paymentMethodData, and the
+                        // Store API /wc/store/v1/checkout POST will carry the id
+                        // into process_payment() for capture.
+                        jQuery(document.body).trigger('angelleye_ppcp_cc_approved', [{paypalOrderId: data.orderID}]);
+                        return;
+                    }
                     angelleyeOrder.checkoutFormCapture({checkoutSelector, payPalOrderId: data.orderID, errorLogId});
                 }
             },
             onError: function (err) {
-                angelleyeJsErrorLogger.logJsError('card_fields_error', errorLogId);
+                // Ensure retry remains possible after any SDK/createOrder level error.
+                jQuery(checkoutSelector).removeClass('processing paypal_cc_submiting createOrder');
+                angelleyeOrder.stopPpcpCcSubmitWatchdog();
+                angelleyeOrder.hideProcessingSpinner(spinnerSelectors);
+                // Snapshot before the trigger below: on Blocks the runBlocksPpcpCcFlow
+                // errorHandler runs synchronously and its cleanup() resets
+                // ppcp_block_mode to false, so reading the flag after dispatch would
+                // send the Blocks flow down the classic branch.
+                const isBlockMode = angelleyeOrder.ppcp_block_mode;
+                const errorMessage = (isBlockMode && angelleyeOrder.blockCreateOrderError)
+                    || angelleyeOrder.parsePayPalSdkError(err);
+                jQuery(document.body).trigger('angelleye_ppcp_cc_error', [{message: errorMessage}]);
+                if (isBlockMode) {
+                    return;
+                }
+                if (!isItApiError) {
+                    angelleyeOrder.showError(errorMessage);
+                    angelleyeJsErrorLogger.logJsError(errorMessage, errorLogId);
+                }
+
+                if (typeof err === 'object' && err !== null) {
+
+                    if (err.stack) {
+
+                    }
+                } else {
+
+                }
             },
             style: {
                 'input': {
@@ -596,23 +1052,57 @@ const angelleyeOrder = {
             }
         });
         if (cardFields.isEligible()) {
+            // On Blocks checkout the form element gets replaced after a
+            // failed validation submit, so the `.CardFields` guard above
+            // doesn't prevent a re-entry. Wipe any stale iframes left over
+            // from the previous render before the SDK mounts new ones;
+            // otherwise the customer sees each card field duplicated.
+            jQuery('#angelleye_ppcp_cc-card-number, #angelleye_ppcp_cc-card-expiry, #angelleye_ppcp_cc-card-cvc').empty();
+            // Claim this container node + stamp the time before the async
+            // iframe mount starts, so any re-entrant renderHostedButtons
+            // call bails on the guard above (during the in-flight window)
+            // instead of mounting a duplicate set.
+            angelleyeOrder.hostedFieldsContainer = document.getElementById('angelleye_ppcp_cc-card-number');
+            angelleyeOrder.hostedFieldsRenderedAt = Date.now();
             cardFields.NumberField().render("#angelleye_ppcp_cc-card-number");
             cardFields.ExpiryField().render("#angelleye_ppcp_cc-card-expiry");
             cardFields.CVVField().render("#angelleye_ppcp_cc-card-cvc");
         } else {
             jQuery('.payment_method_angelleye_ppcp_cc').hide();
         }
-        jQuery(document.body).on('submit_paypal_cc_form', (event) => {
+        jQuery(document.body).off('submit_paypal_cc_form.angelleyePpcpCc').on('submit_paypal_cc_form.angelleyePpcpCc', (event) => {
             event.preventDefault();
             cardFields.getState().then((data) => {
                 if (data.isFormValid) {
                     angelleyeOrder.showProcessingSpinner(spinnerSelectors);
                     cardFields.submit().then(() => {
                     }).catch((error) => {
+                        angelleyeOrder.stopPpcpCcSubmitWatchdog();
 
                     });
                 } else if (!data.isFormValid) {
+                    angelleyeOrder.stopPpcpCcSubmitWatchdog();
+                    angelleyeOrder.hideProcessingSpinner();
                     jQuery(checkoutSelector).removeClass('processing paypal_cc_submiting CardFields createOrder');
+                    // Snapshot before the trigger below: the Blocks errorHandler
+                    // cleanup() flips ppcp_block_mode to false synchronously.
+                    const isBlockMode = angelleyeOrder.ppcp_block_mode;
+                    // context='card_invalid' signals the Blocks subscriber to
+                    // display this notice next to the payment method block
+                    // (where the card fields live) instead of at the top of
+                    // the checkout form. On classic checkout nothing in-plugin
+                    // listens, but the card fields reject the payment before
+                    // wc-ajax=checkout is ever sent, so WooCommerce's
+                    // checkout_error never fires and integrations have no other
+                    // hook for this failure.
+                    jQuery(document.body).trigger('angelleye_ppcp_cc_error', [{
+                        message: localizedMessages.fields_not_valid,
+                        context: 'card_invalid'
+                    }]);
+                    if (isBlockMode) {
+                        return;
+                    }
+                    angelleyeOrder.removeError();
                     angelleyeOrder.showError(localizedMessages.fields_not_valid);
                     return;
                 } else if (data.errors) {
@@ -621,8 +1111,30 @@ const angelleyeOrder = {
 
                     });
                 }
+            }).catch((error) => {
+                // A rejected getState() must not strand the checkout in the
+                // processing state. Without this catch the spinner shown by
+                // triggerPpcpCcSubmit() would stay on screen forever, since
+                // the .then() cleanup never runs. Clear the spinner and submit
+                // guards so the customer can retry.
+                angelleyeOrder.stopPpcpCcSubmitWatchdog();
+                angelleyeOrder.hideProcessingSpinner();
+                jQuery(checkoutSelector).removeClass('processing paypal_cc_submiting CardFields createOrder');
+
+                // Snapshot before the trigger below: the Blocks errorHandler
+                // cleanup() flips ppcp_block_mode to false synchronously.
+                const isBlockMode = angelleyeOrder.ppcp_block_mode;
+                jQuery(document.body).trigger('angelleye_ppcp_cc_error', [{
+                    message: localizedMessages.fields_not_valid,
+                    context: 'card_invalid'
+                }]);
+                if (!isBlockMode) {
+                    angelleyeOrder.removeError();
+                    angelleyeOrder.showError(localizedMessages.fields_not_valid);
+                }
             });
         });
+        angelleyeOrder.setPpcpCcSubmitHookReady(true);
     },
     applePayDataInit: async () => {
         // This function is deprecated as we don't use it because its already loaded in environment
@@ -762,6 +1274,26 @@ const angelleyeOrder = {
 
         }
     },
+    isBlockExpressRenderPending: false,
+    // Entry point for the Blocks express component's mount effect.
+    //
+    // That component mounts before wc-gateway-ppcp-angelleye-public.js has run,
+    // so at mount time neither handleRaceConditionOnWooHooks() nor
+    // handleWooEvents() is bound and a jQuery trigger would be fired at an empty
+    // document.body and lost — jQuery events are not retroactive. Calling
+    // renderPaymentButtons() directly is no better: renderSmartButton() bails on
+    // `typeof angelleye_paypal_sdk === 'undefined'` and the effect never retries.
+    //
+    // angelleyeOrder is a header script, so it always exists by the time the
+    // component mounts. Record the request as state here and let
+    // initSmartButtons() act on it once the SDK is ready.
+    renderBlockExpressButton: () => {
+        if (typeof angelleye_paypal_sdk !== 'undefined') {
+            angelleyeOrder.renderPaymentButtons();
+            return;
+        }
+        angelleyeOrder.isBlockExpressRenderPending = true;
+    },
     renderPaymentButtons: () => {
         angelleyeOrder.hideShowPlaceOrderButton();
         angelleyeOrder.renderSmartButton();
@@ -793,9 +1325,27 @@ const angelleyeOrder = {
             jQuery(document.body).on('trigger_angelleye_ppcp_cc', function (event) {
                 angelleyeOrder.renderPaymentButtons();
             });
+            // Off the cart page (e.g. a sliding cart on shop/archive/product pages) adding an
+            // item fires added_to_cart rather than updated_cart_totals. Refresh the cached cart
+            // totals from the angelleye_payments_data fragment so express buttons read the fresh
+            // total instead of the stale page-load value, which otherwise surfaced a false
+            // "your shopping cart seems to be empty" error on the Google Pay/Apple Pay button.
+            jQuery(document.body).on('added_to_cart', function (event, fragments) {
+                if (fragments && typeof fragments['angelleye_payments_data'] !== 'undefined') {
+                    angelleyeOrder.updateCartTotalsInEnvironment(JSON.parse(fragments['angelleye_payments_data']));
+                    angelleyeOrder.renderPaymentButtons();
+                }
+            });
         },
         handleRaceConditionOnWooHooks: () => {
-            jQuery(document.body).on('updated_cart_totals payment_method_selected updated_checkout ppcp_block_ready', function (event, data) {
+            // trigger_angelleye_ppcp_cc is fired by the Blocks-checkout
+            // Content_PPCP_CC React component's useEffect on mount. On first
+            // page load it races the async PayPal SDK load: the real handler
+            // in handleWooEvents() is only wired up AFTER the SDK finishes
+            // loading (inside initSmartButtons), so without queuing this
+            // event here the early trigger is lost and the express button /
+            // hosted card fields never render until the user refreshes.
+            jQuery(document.body).on('updated_cart_totals payment_method_selected updated_checkout ppcp_block_ready trigger_angelleye_ppcp_cc', function (event, data) {
                 if (!angelleyeOrder.isPendingEventTriggering) {
                     angelleyeOrder.addEventsForCallback(event.type, event, data);
                 }
@@ -822,24 +1372,27 @@ const angelleyeOrder = {
     }
 }
 
-__ = wp.i18n.__;
-const localizedMessages = {
-    card_not_supported: __('Unfortunately, we do not support this credit card type. Please try another card type.', 'paypal-for-woocommerce'),
-    fields_not_valid: __('Unfortunately, your credit card details are not valid. Please review the card details and try again.', 'paypal-for-woocommerce'),
-    error_message_checkout_validation: __('Unable to create the order due to the following errors.', 'paypal-for-woocommerce'),
-    expiry_date_placeholder: __('MM / YY', 'paypal-for-woocommerce'),
-    cvc_placeholder: __('CVC', 'paypal-for-woocommerce', 'paypal-for-woocommerce'),
-    empty_cart_message: __('Your shopping cart seems to be empty.', 'paypal-for-woocommerce'),
-    total_amount_placeholder: __('Total Amount', 'paypal-for-woocommerce'),
-    apple_pay_pay_error: __('An error occurred while initiating the ApplePay payment.', 'paypal-for-woocommerce'),
-    error_validating_merchant: __('This merchant is not enabled to process requested payment method. please contact website owner.', 'paypal-for-woocommerce'),
-    general_error_message: __('We are unable to process your request at the moment, please contact website owner.', 'paypal-for-woocommerce'),
-    shipping_amount_update_error: __('Unable to update the shipping amount.', 'paypal-for-woocommerce'),
-    shipping_amount_pull_error: __('Unable to pull the shipping amount details based on selected address', 'paypal-for-woocommerce'),
-    currency_change_js_load_error: __('We encountered an issue loading the updated currency. Please refresh the page or contact support for assistance.', 'paypal-for-woocommerce'),
-    create_order_error: __('Unable to create the order, please contact the support.', 'paypal-for-woocommerce'),
-    create_order_error_with_content: __('Unable to create the order, please contact the support with following error message.', 'paypal-for-woocommerce')
-};
+const localizedMessages = ( function() {
+    const { __ } = wp.i18n;
+    return {
+        card_not_supported: __('Unfortunately, we do not support this credit card type. Please try another card type.', 'paypal-for-woocommerce'),
+        fields_not_valid: __('Unfortunately, your credit card details are not valid. Please review the card details and try again.', 'paypal-for-woocommerce'),
+        error_message_checkout_validation: __('Unable to create the order due to the following errors.', 'paypal-for-woocommerce'),
+        expiry_date_placeholder: __('MM / YY', 'paypal-for-woocommerce'),
+        cvc_placeholder: __('CVC', 'paypal-for-woocommerce', 'paypal-for-woocommerce'),
+        empty_cart_message: __('Your shopping cart seems to be empty.', 'paypal-for-woocommerce'),
+        total_amount_placeholder: __('Total Amount', 'paypal-for-woocommerce'),
+        apple_pay_pay_error: __('An error occurred while initiating the ApplePay payment.', 'paypal-for-woocommerce'),
+        error_validating_merchant: __('This merchant is not enabled to process requested payment method. please contact website owner.', 'paypal-for-woocommerce'),
+        general_error_message: __('We are unable to process your request at the moment, please contact website owner.', 'paypal-for-woocommerce'),
+        shipping_amount_update_error: __('Unable to update the shipping amount.', 'paypal-for-woocommerce'),
+        apple_pay_amount_changed_error: __('Your order total has changed since Apple Pay was opened. Please review the total and confirm your payment again.', 'paypal-for-woocommerce'),
+        shipping_amount_pull_error: __('Unable to pull the shipping amount details based on selected address', 'paypal-for-woocommerce'),
+        currency_change_js_load_error: __('We encountered an issue loading the updated currency. Please refresh the page or contact support for assistance.', 'paypal-for-woocommerce'),
+        create_order_error: __('Unable to create the order, please contact the support.', 'paypal-for-woocommerce'),
+        create_order_error_with_content: __('Unable to create the order, please contact the support with following error message.', 'paypal-for-woocommerce')
+    };
+} )();
 
 const pfwUrlHelper = {
     getUrlObject: (url) => {

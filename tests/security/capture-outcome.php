@@ -12,6 +12,7 @@ class AngellEye_Session_Manager {
     public static function clear() {}
 }
 function apply_filters($tag, $value, ...$args) { return $value; }
+function angelleye_ppcp_trigger_payment_successful_result($result, $order) { return apply_filters('woocommerce_payment_successful_result', $result, $order); }
 function angelleye_ppcp_get_awaiting_payment_order_id() { return 1; }
 function wc_get_order($id) { return new CaptureTestOrder(); }
 function wp_send_json_success($data) { throw new CaptureResponseSent($data); }

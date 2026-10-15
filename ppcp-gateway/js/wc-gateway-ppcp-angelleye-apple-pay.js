@@ -110,6 +110,14 @@ class ApplePayCheckoutButton {
         // }
     }
 
+    /**
+     * Decides whether to ask Apple for a recurring merchant token or a one-time
+     * token. angelleye_ppcp_is_apple_pay_recurring_token() in
+     * angelleye-paypal-ppcp-common-functions.php mirrors this condition when it
+     * builds payment_source.apple_pay - PayPal rejects confirmOrder() if the
+     * order's stored_credential and the token disagree, so the two must move
+     * together.
+     */
     static addPaymentMethodSaveParams () {
         let isNewPaymentMethodSelected = jQuery('input#wc-angelleye_ppcp_apple_pay-new-payment-method:checked').val();
         const cartDetails = angelleyeOrder.getCartDetails();
@@ -151,11 +159,18 @@ class ApplePayCheckoutButton {
 
         if (cartDetails.totalAmount <= 0) {
             angelleyeOrder.showError(localizedMessages.empty_cart_message);
+            angelleyeOrder.hideProcessingSpinner();
+            return;
         }
 
         let shippingAddressRequired = [];
         if (cartDetails.shippingRequired) {
-            shippingAddressRequired = ["postalAddress", "name", "email"];
+            // "phone" belongs here as well as in the billing list below: without
+            // it Apple returns a shipping contact with no phone number, the
+            // checkout POST goes out with an empty shipping_phone, and any store
+            // that marks Shipping Phone required rejects the order outright for
+            // every buyer shipping to a different address.
+            shippingAddressRequired = ["postalAddress", "name", "email", "phone"];
         }
 
         let subscriptionParams = ApplePayCheckoutButton.addPaymentMethodSaveParams();
@@ -187,6 +202,33 @@ class ApplePayCheckoutButton {
             return;
         }
 
+        // ApplePaySession completion calls are phase-specific: each is legal
+        // only while the sheet is in the matching state, and every one of them
+        // throws InvalidAccessError once the sheet has been dismissed or timed
+        // out. Both showed up in production as a raw
+        // "The object does not support the operation or argument." shown to the
+        // buyer, so route every call through safeSessionCall() and track which
+        // phase the sheet is in.
+        let sessionClosed = false;
+        let awaitingPaymentAuthorization = false;
+        // True once the sheet has been repriced against the wallet address, so
+        // the order must be built from it rather than the posted form fields.
+        let walletAddressIsAuthoritative = false;
+
+        let safeSessionCall = (label, fn) => {
+            try {
+                fn();
+            } catch (e) {
+
+                angelleyeJsErrorLogger.addToLog(errorLogId, {
+                    context: 'apple_pay_session_call_failed',
+                    call: label,
+                    message: e?.message,
+                    time: new Date()
+                });
+            }
+        };
+
         let paymentCancelled = (error) => {
             angelleyeOrder.triggerPaymentCancelEvent();
             angelleyeOrder.hideProcessingSpinner();
@@ -195,15 +237,50 @@ class ApplePayCheckoutButton {
                 angelleyeOrder.showError(errorMessage);
                 angelleyeJsErrorLogger.logJsError(errorMessage, errorLogId);
 
-                session.completePayment({
-                    status: ApplePaySession.STATUS_FAILURE,
-                });
+                // completePayment() is only legal once onpaymentauthorized has
+                // fired. Calling it from the shipping-contact phase - which the
+                // shipping update's catch used to do - throws, and the buyer is
+                // left looking at a Safari internal error string.
+                if (sessionClosed) {
+                    return;
+                }
+                sessionClosed = true;
+                if (awaitingPaymentAuthorization) {
+                    safeSessionCall('completePayment', () => session.completePayment({
+                        status: ApplePaySession.STATUS_FAILURE,
+                    }));
+                } else {
+                    safeSessionCall('abort', () => session.abort());
+                }
             }
         };
 
         let parseErrorMessage = (errorObject) => {
 
 
+            // The buyer-facing sentence is deliberately generic, but it used to
+            // be all we kept: errorName and message carry PayPal's actual
+            // rejection reason and were dropped on the floor, so every distinct
+            // failure landed in the log as the same contentless string plus a
+            // debug id we could only redeem through PayPal support. Record the
+            // detail on the trace before collapsing it for display.
+            angelleyeJsErrorLogger.addToLog(errorLogId, {
+                context: 'apple_pay_error',
+                name: errorObject?.name,
+                errorName: errorObject?.errorName,
+                message: errorObject?.message,
+                paypalDebugId: errorObject?.paypalDebugId,
+                // Errors serialize to {} through JSON.stringify, so pull the
+                // enumerable own properties across explicitly.
+                details: (() => {
+                    try {
+                        return JSON.stringify(errorObject, Object.getOwnPropertyNames(Object(errorObject)));
+                    } catch (e) {
+                        return String(errorObject);
+                    }
+                })(),
+                time: new Date()
+            });
             if (errorObject.name === 'PayPalApplePayError') {
                 let debugID = errorObject.paypalDebugId;
                 switch (errorObject.errorName) {
@@ -213,6 +290,11 @@ class ApplePayCheckoutButton {
                         return localizedMessages.general_error_message + ' [ApplePay DebugId:' + debugID + ']';
                 }
             }
+            // Anything else reached showError()/logJsError() as a raw object,
+            // which renders as [object Object] and stringifies to {}.
+            if (errorObject instanceof Error) {
+                return errorObject.message;
+            }
             return errorObject;
         };
         session.onvalidatemerchant = (event) => {
@@ -220,21 +302,24 @@ class ApplePayCheckoutButton {
                 validationUrl: event.validationURL,
             })
             .then((payload) => {
-                session.completeMerchantValidation(payload.merchantSession);
+                safeSessionCall('completeMerchantValidation', () => session.completeMerchantValidation(payload.merchantSession));
             })
             .catch((error) => {
                 angelleyeOrder.hideProcessingSpinner();
                 let errorMessage = parseErrorMessage(error);
                 angelleyeOrder.showError(errorMessage);
                 angelleyeJsErrorLogger.logJsError(errorMessage, errorLogId);
-                session.abort();
+                if (!sessionClosed) {
+                    sessionClosed = true;
+                    safeSessionCall('abort', () => session.abort());
+                }
             });
         };
 
         session.onpaymentmethodselected = (event) => {
-            session.completePaymentMethodSelection({
+            safeSessionCall('completePaymentMethodSelection', () => session.completePaymentMethodSelection({
                 newTotal: paymentRequest.total,
-            });
+            }));
         };
 
         session.onshippingcontactselected = async (event) => {
@@ -247,7 +332,7 @@ class ApplePayCheckoutButton {
             };
 
             try {
-                let response = await angelleyeOrder.shippingAddressUpdate({shippingDetails: event.shippingContact});
+                let response = await angelleyeOrder.shippingAddressUpdate({shippingDetails: event.shippingContact}, undefined, undefined, containerSelector);
 
                 if (typeof response.totalAmount !== 'undefined') {
                     angelleyeOrder.updateCartTotalsInEnvironment(response);
@@ -262,7 +347,8 @@ class ApplePayCheckoutButton {
                         total: newTotal,
                         lineItems: response.lineItems
                     });
-                    session.completeShippingContactSelection(shippingContactUpdate);
+                    walletAddressIsAuthoritative = true;
+                    safeSessionCall('completeShippingContactSelection', () => session.completeShippingContactSelection(shippingContactUpdate));
                 } else {
                     throw new Error(localizedMessages.shipping_amount_update_error);
                 }
@@ -274,13 +360,15 @@ class ApplePayCheckoutButton {
         session.onshippingmethodselected = async (event) => {
 
             let shippingMethodUpdate = {}
-            session.completeShippingMethodSelection(shippingMethodUpdate);
+            safeSessionCall('completeShippingMethodSelection', () => session.completeShippingMethodSelection(shippingMethodUpdate));
         }
 
         session.onpaymentauthorized = async (event) => {
+            awaitingPaymentAuthorization = true;
             try {
 
                 // create the order to send a payment request
+                angelleyeOrder.setWalletAddressAuthoritative(walletAddressIsAuthoritative);
                 let orderID = await angelleyeOrder.createOrder({
                     angelleye_ppcp_button_selector: containerSelector,
                     billingDetails: event.payment.billingContact,
@@ -288,6 +376,21 @@ class ApplePayCheckoutButton {
                     errorLogId
                 }).then((orderData) => {
 
+                    // PayPal rejects confirmOrder() when the order total is not
+                    // the total the buyer approved; say so rather than sending a
+                    // confirm that is certain to fail.
+                    if (typeof orderData.totalAmount !== 'undefined'
+                            && `${orderData.totalAmount}` !== `${paymentRequest.total.amount}`) {
+                        angelleyeJsErrorLogger.addToLog(errorLogId, {
+                            context: 'apple_pay_total_mismatch',
+                            sheetTotal: paymentRequest.total.amount,
+                            orderTotal: orderData.totalAmount,
+                            orderID: orderData.orderID,
+                            time: new Date()
+                        });
+                        angelleyeOrder.updateCartTotalsInEnvironment(orderData);
+                        throw new Error(localizedMessages.apple_pay_amount_changed_error);
+                    }
                     return orderData.orderID;
                 });
 
@@ -296,9 +399,10 @@ class ApplePayCheckoutButton {
                  */
                 await ApplePayCheckoutButton.applePay().confirmOrder({ orderId: orderID, token: event.payment.token, billingContact: event.payment.billingContact, shippingContact: event.payment.shippingContact });
 
-                await session.completePayment({
+                sessionClosed = true;
+                safeSessionCall('completePayment', () => session.completePayment({
                     status: ApplePaySession.STATUS_SUCCESS,
-                });
+                }));
                 angelleyeOrder.approveOrder({orderID: orderID, payerID: ''});
             } catch (error) {
                 paymentCancelled(error);
@@ -307,6 +411,7 @@ class ApplePayCheckoutButton {
 
         session.oncancel  = (event) => {
 
+            sessionClosed = true;
             paymentCancelled();
         }
 

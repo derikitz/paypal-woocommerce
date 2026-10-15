@@ -46,7 +46,7 @@ $order = new WC_Order();
 $user = 12;
 $before_pay_hooks = 0;
 $notices = array();
-$store = (object) array('session' => new AccessSession(), 'cart' => new class { public function get_total($context) { return 10; } });
+$store = (object) array('customer' => null, 'session' => new AccessSession(), 'cart' => new class { public function get_total($context) { return 10; } });
 function WC() { global $store; return $store; }
 function wc_get_order($id) { global $order; return (int)$id === $order->id ? $order : false; }
 function current_user_can($cap, $id) { global $order, $user; return $cap === 'pay_for_order' && ($order->owner === 0 || $user === $order->owner); }

@@ -125,7 +125,11 @@ var {addAction} = wp.hooks;
 
                 const Content_PPCP_Smart_Button_Express = () => {
                     useEffect(() => {
-                        angelleyeOrder.renderPaymentButtons();
+                        // Not renderPaymentButtons() directly: this effect runs
+                        // before the PayPal SDK has loaded, renderSmartButton()
+                        // bails out when it is missing, and an empty dep array
+                        // means it never retries. See renderBlockExpressButton().
+                        angelleyeOrder.renderBlockExpressButton();
                     }, []);
                     return createElement("div", {id: "angelleye_ppcp_checkout_top"});
                 };
@@ -252,10 +256,12 @@ const ppcp_uniqueEvents = new Set([
 
 ppcp_uniqueEvents.forEach(function (action) {
     addAction(action, "c", function () {
-        jQuery("#angelleye_ppcp_checkout").block({
-            message: null,
-            overlayCSS: {background: "#fff", opacity: 0.6},
-        });
+        if (typeof jQuery.fn.block === "function") {
+            jQuery("#angelleye_ppcp_checkout").block({
+                message: null,
+                overlayCSS: {background: "#fff", opacity: 0.6},
+            });
+        }
         setTimeout(function () {
             jQuery(document.body).trigger("ppcp_checkout_updated");
         }, 2000);

@@ -3,12 +3,14 @@
 define('ABSPATH', __DIR__ . '/');
 define('VERSION_PFW', 'test');
 define('AE_FEE', 'test-fee');
+define('PAYPAL_PARTNER_ATTRIBUTION_ID', 'TEST_BN');
 
 class WP_Error {
     public function __construct($code, $message) { $this->message = $message; }
     private $message;
     public function get_error_message() { return $this->message; }
 }
+function apply_filters($tag, $value, ...$args) { return $value; }
 function is_wp_error($value) { return $value instanceof WP_Error; }
 function wp_json_encode($value) { return json_encode($value); }
 function wp_parse_url($url, $component) { return parse_url($url, $component); }
@@ -201,6 +203,7 @@ require dirname(__DIR__, 2) . '/ppcp-gateway/angelleye-paypal-ppcp-common-functi
 reset_http(array(token_response('probe'), response(201, array('status' => 'CREATED'))));
 expect_check(angelleye_ppcp_account_ready_to_paid(true, 'client', 'secret', 'seller@example.test'), 'Readiness probe succeeds');
 expect_check($calls[1]['args']['headers']['Authorization'] === 'Bearer probe', 'Readiness probe uses access token');
+expect_check($calls[1]['args']['headers']['PayPal-Partner-Attribution-Id'] === angelleye_ppcp_get_partner_attribution_id(), 'Readiness probe includes partner attribution');
 reset_http(array(response(401, array())));
 expect_check(!angelleye_ppcp_account_ready_to_paid(true, 'client', 'secret', 'seller@example.test') && count($calls) === 1, 'Readiness probe stops on OAuth failure');
 
@@ -255,5 +258,15 @@ $offer_args['angelleye_operation_scope']['resource'] = 'offer:2';
 reset_http(array(response(201, array('id' => 'SECOND-OFFER', 'status' => 'CREATED'))), false);
 $request->request($url, $offer_args, 'create_order');
 expect_check($calls[0]['args']['headers']['PayPal-Request-Id'] !== $offer_id, 'Separate equal-amount offers get distinct request identities');
+
+// Upstream BN attribution must coexist with Bearer auth and caller overrides.
+$request->is_first_party_used = 'yes';
+reset_http(array(token_response(), response(200, array('id' => 'ATTRIBUTION', 'status' => 'CREATED'))));
+$request->request($url . '/ATTRIBUTION', array('method' => 'GET', 'headers' => array()), 'get_order');
+expect_check($calls[1]['args']['headers']['Authorization'] === 'Bearer server-token', 'Attributed direct call keeps OAuth');
+expect_check($calls[1]['args']['headers']['PayPal-Partner-Attribution-Id'] === angelleye_ppcp_get_partner_attribution_id(), 'Direct call includes partner attribution');
+reset_http(array(token_response(), response(200, array('id' => 'ATTRIBUTION'))));
+$request->request($url . '/ATTRIBUTION', array('method' => 'GET', 'headers' => array('PayPal-Partner-Attribution-Id' => 'CUSTOM_BN')), 'get_order');
+expect_check($calls[1]['args']['headers']['PayPal-Partner-Attribution-Id'] === 'CUSTOM_BN', 'Caller attribution preserved');
 
 echo 'Passed ' . $checks . " direct OAuth and transport checks.\n";

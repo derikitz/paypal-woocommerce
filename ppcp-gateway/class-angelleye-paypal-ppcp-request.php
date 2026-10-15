@@ -227,6 +227,13 @@ class AngellEYE_PayPal_PPCP_Request {
         $args['sslverify'] = true;
         $args['redirection'] = 0;
 
+        if (function_exists('angelleye_ppcp_get_partner_attribution_id')) {
+            $bn_code = angelleye_ppcp_get_partner_attribution_id();
+            if ($bn_code !== '' && empty($args['headers']['PayPal-Partner-Attribution-Id'])) {
+                $args['headers']['PayPal-Partner-Attribution-Id'] = $bn_code;
+            }
+        }
+
         // ID tokens are obtained at the OAuth endpoint, not with an access token.
         if ('generate_id_token' === $action_name && rtrim($url, '/') === $this->token_url) {
             $body = isset($args['body']) && is_array($args['body']) ? $args['body'] : array();

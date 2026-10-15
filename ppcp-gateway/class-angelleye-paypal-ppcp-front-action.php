@@ -156,7 +156,38 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                             $woocommerce->customer->set_shipping_country($shipping_address['countryCode']);
                             $woocommerce->customer->set_shipping_city($shipping_address['locality']);
                             $woocommerce->customer->set_shipping_state($shipping_address['administrativeArea']);
+                            // Apple Pay only honours "phone" in
+                            // requiredShippingContactFields, so the shipping
+                            // contact is the sole source of a phone number in
+                            // the wallet flow - the billing contact never
+                            // carries one. Feed it to billing as well, the same
+                            // way emailAddress is borrowed above, and mirror it
+                            // into $_POST: process_checkout() validates the raw
+                            // post data and rejects the order outright when a
+                            // required phone field is empty.
+                            if (!empty($shipping_address['phoneNumber'])) {
+                                $wallet_phone = wc_clean($shipping_address['phoneNumber']);
+                                if (method_exists($woocommerce->customer, 'set_shipping_phone')) {
+                                    $woocommerce->customer->set_shipping_phone($wallet_phone);
+                                }
+                                if (empty($_POST['shipping_phone'])) {
+                                    $_POST['shipping_phone'] = $wallet_phone;
+                                }
+                                if (empty($_POST['billing_phone'])) {
+                                    $woocommerce->customer->set_billing_phone($wallet_phone);
+                                    $_POST['billing_phone'] = $wallet_phone;
+                                }
+                            }
                         }
+                    }
+
+                    // Only when the wallet repriced the sheet; otherwise the
+                    // posted fields are what the buyer approved.
+                    if (!empty($_POST['angelleye_ppcp_wallet_address_authoritative'])) {
+                        $this->angelleye_ppcp_apply_wallet_address_to_post(
+                                $billing_address ?? null,
+                                $shipping_address ?? null
+                        );
                     }
 
                     $request_from_page = $_GET['from'] ?? '';
@@ -187,7 +218,68 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                         }
                         exit();
                     } elseif ('checkout' === $request_from_page) {
-                        if (isset($_POST) && !empty($_POST)) {
+                        $checkout_source = isset($_REQUEST['angelleye_ppcp_checkout_source']) ? wc_clean(wp_unslash($_REQUEST['angelleye_ppcp_checkout_source'])) : '';
+                        $is_checkout_top = 'checkout_top' === $checkout_source;
+                        $is_checkout_regular = 'checkout_regular' === $checkout_source;
+                        $is_block_checkout = 'block_checkout' === $checkout_source;
+
+                        if (!$is_checkout_top && !$is_checkout_regular && !$is_block_checkout) {
+                            $is_checkout_top = empty($_POST);
+                            $is_checkout_regular = !$is_checkout_top;
+                        }
+
+                        if ($is_block_checkout) {
+                            // WooCommerce Blocks checkout. This pre-flight call exists
+                            // only to build a PayPal order against the current cart so
+                            // the SDK has an order id to authorize against. All order
+                            // validation, custom fields, extensions and process_payment
+                            // routing happen later via the Store API /wc/store/v1/checkout
+                            // POST that Blocks fires after our SDK onApprove callback
+                            // returns the paypal_order_id via paymentMethodData.
+                            self::$is_user_logged_in_before_checkout = is_user_logged_in();
+                            if (isset($_POST['address']) && strlen($_POST['address']) > 2) {
+                                $address_data = json_decode(stripslashes($_POST['address']), true);
+                                if (is_array($address_data)) {
+                                    if (!empty($address_data['billing']) && is_array($address_data['billing'])) {
+                                        $b = $address_data['billing'];
+                                        !empty($b['first_name']) && $woocommerce->customer->set_billing_first_name($b['first_name']);
+                                        !empty($b['last_name']) && $woocommerce->customer->set_billing_last_name($b['last_name']);
+                                        !empty($b['company']) && $woocommerce->customer->set_billing_company($b['company']);
+                                        !empty($b['address_1']) && $woocommerce->customer->set_billing_address_1($b['address_1']);
+                                        !empty($b['address_2']) && $woocommerce->customer->set_billing_address_2($b['address_2']);
+                                        !empty($b['city']) && $woocommerce->customer->set_billing_city($b['city']);
+                                        !empty($b['state']) && $woocommerce->customer->set_billing_state($b['state']);
+                                        !empty($b['postcode']) && $woocommerce->customer->set_billing_postcode($b['postcode']);
+                                        !empty($b['country']) && $woocommerce->customer->set_billing_country($b['country']);
+                                        !empty($b['email']) && $woocommerce->customer->set_billing_email($b['email']);
+                                        !empty($b['phone']) && $woocommerce->customer->set_billing_phone($b['phone']);
+                                    }
+                                    if (!empty($address_data['shipping']) && is_array($address_data['shipping'])) {
+                                        $s = $address_data['shipping'];
+                                        !empty($s['first_name']) && $woocommerce->customer->set_shipping_first_name($s['first_name']);
+                                        !empty($s['last_name']) && $woocommerce->customer->set_shipping_last_name($s['last_name']);
+                                        !empty($s['company']) && $woocommerce->customer->set_shipping_company($s['company']);
+                                        !empty($s['address_1']) && $woocommerce->customer->set_shipping_address_1($s['address_1']);
+                                        !empty($s['address_2']) && $woocommerce->customer->set_shipping_address_2($s['address_2']);
+                                        !empty($s['city']) && $woocommerce->customer->set_shipping_city($s['city']);
+                                        !empty($s['state']) && $woocommerce->customer->set_shipping_state($s['state']);
+                                        !empty($s['postcode']) && $woocommerce->customer->set_shipping_postcode($s['postcode']);
+                                        !empty($s['country']) && $woocommerce->customer->set_shipping_country($s['country']);
+                                    }
+                                    $woocommerce->customer->save();
+                                }
+                            }
+                            if (!empty($_POST['angelleye_ppcp_payment_method_title'])) {
+                                AngellEye_Session_Manager::set('payment_method_title', wc_clean(wp_unslash($_POST['angelleye_ppcp_payment_method_title'])));
+                            }
+                            if (!empty($_POST['payment_method'])) {
+                                AngellEye_Session_Manager::set('payment_method_id', wc_clean(wp_unslash($_POST['payment_method'])));
+                            }
+                            $this->payment_request->angelleye_ppcp_create_order_request();
+                            exit();
+                        }
+
+                        if ($is_checkout_regular) {
                             self::$is_user_logged_in_before_checkout = is_user_logged_in();
                             $address = array();
                             if (isset($_POST['address']) && strlen($_POST['address']) > 2) {
@@ -240,6 +332,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                         } else {
                             $_GET['from'] = 'checkout_top';
                             AngellEye_Session_Manager::set('from', 'checkout_top');
+                            self::$checkout_started_from = 'checkout_top';
                             $this->payment_request->angelleye_ppcp_create_order_request();
                         }
                         exit();
@@ -252,7 +345,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                             $addToCart = $_REQUEST['angelleye_ppcp-add-to-cart'] ?? null;
 
                             if (!empty($addToCart) && angelleye_ppcp_get_order_total() > 0) {
-                                WC()->cart->empty_cart();
+                                $this->angelleye_ppcp_empty_cart_preserving_session();
                             }
 
                             if (angelleye_ppcp_get_order_total() === 0 && !empty($addToCart)) {
@@ -336,7 +429,17 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                     }
                     $orderTotal = WC()->cart->get_total('');
                     $addToCart = $_REQUEST['angelleye_ppcp-add-to-cart'] ?? null;
-                    if (!empty($addToCart)) {
+                    // Empty the cart before re-adding so a product that is already in the cart
+                    // is not counted twice, which doubled the Google Pay/Apple Pay total when
+                    // the shipping-address-update callback fired for an item already in the cart.
+                    // Mirrors the guard used in the create_order branch above. The session-clear
+                    // listener is suspended: this callback also runs after the buyer authorizes
+                    // the payment, and clearing the PPCP session here loses reference_id and
+                    // aborts the capture in the subsequent direct_capture request.
+                    if (!empty($addToCart) && angelleye_ppcp_get_order_total() > 0) {
+                        $this->angelleye_ppcp_empty_cart_preserving_session();
+                    }
+                    if (!empty($addToCart) && angelleye_ppcp_get_order_total() === 0) {
                         try {
                             if (!class_exists('AngellEYE_PayPal_PPCP_Product')) {
                                 include_once ( PAYPAL_FOR_WOOCOMMERCE_PLUGIN_DIR . '/ppcp-gateway/class-angelleye-paypal-ppcp-product.php');
@@ -348,6 +451,9 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                             $this->api_log->log($ex->getMessage(), 'error');
                         }
                     }
+                    // After any add-to-cart rebuild above, which discards
+                    // whatever was calculated before it.
+                    $this->angelleye_ppcp_sync_wallet_tax_location($shipping_address ?? null);
                     if (!empty($woo_order_id)) {
                         $order = $pay_order;
                         if (is_a($order, 'WC_Order')) {
@@ -418,6 +524,10 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                     $this->payment_request->angelleye_ppcp_paypal_create_payment_token_free_signup_with_free_trial();
                     exit();
                 case "advanced_credit_card_create_payment_token":
+                    // Token is saved against the current user, so a guest call is never valid.
+                    if (!is_user_logged_in()) {
+                        wp_send_json(['result' => 'failure', 'redirect' => wc_get_page_permalink('myaccount')], 403);
+                    }
                     $this->payment_request->angelleye_ppcp_advanced_credit_card_create_payment_token();
                     exit();
                 case "advanced_credit_card_create_payment_token_free_signup_with_free_trial":
@@ -460,6 +570,10 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                     wp_send_json(['status' => false]);
                     exit();
                 case "angelleye_ppcp_cc_setup_tokens":
+                    // Only used on My Account > Add payment method, so a guest call is never valid.
+                    if (!is_user_logged_in() || !wp_verify_nonce(wc_clean(wp_unslash($_GET['security'] ?? '')), 'angelleye_ppcp_cc_setup_tokens')) {
+                        wp_send_json(['result' => 'failure'], 403);
+                    }
                     $this->payment_request->angelleye_ppcp_advanced_credit_card_setup_tokens();
                     exit();
             }
@@ -571,10 +685,17 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                     AngellEye_Session_Manager::clear();
                     if (ob_get_length())
                         ob_end_clean();
-                    wp_send_json_success(array(
+                    $result = array(
                         'result' => 'success',
                         'redirect' => apply_filters('woocommerce_get_return_url', $order->get_checkout_order_received_url(), $order),
-                    ));
+                    );
+                    // This direct-capture path bypasses WC_Checkout::process_order_payment(), so the
+                    // woocommerce_payment_successful_result filter is never applied. Plugins like
+                    // Germanized for WooCommerce hook that filter to send the order confirmation email
+                    // immediately on order placement (legal requirement in DE). Apply it here so those
+                    // integrations behave the same as the standard checkout flow.
+                    $result = angelleye_ppcp_trigger_payment_successful_result($result, $order);
+                    wp_send_json_success($result);
                 } else {
                     AngellEye_Session_Manager::clear();
                     if (ob_get_length()) {
@@ -655,6 +776,9 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                 if (!class_exists('AngellEYE_PayPal_PPCP_Checkout')) {
                     include_once PAYPAL_FOR_WOOCOMMERCE_PLUGIN_DIR . '/ppcp-gateway/class-angelleye-paypal-ppcp-checkout.php';
                 }
+                /**
+                 * @var AngellEYE_PayPal_PPCP_Checkout $ppcp_checkout
+                 */
                 $ppcp_checkout = AngellEYE_PayPal_PPCP_Checkout::instance();
                 $order_id = $ppcp_checkout->angelleye_ppcp_create_order();
                 $this->payment_request->angelleye_ppcp_create_order_request($order_id > 0 ? $order_id : null);
@@ -790,6 +914,142 @@ class AngellEYE_PayPal_PPCP_Front_Action {
 
     public function angelleye_ppcp_direct_capture() {
         $this->angelleye_ppcp_create_woo_order();
+    }
+
+    /**
+     * Apply a wallet address to WooCommerce's tax location and reprice.
+     *
+     * Mirrors WC_AJAX::update_order_review(). WOOCOMMERCE_CHECKOUT matters:
+     * is_checkout() keys off it, and tax providers such as AvaTax skip
+     * calculation entirely when it is false, repricing the cart to zero tax.
+     *
+     * @param array|null $shipping_address Wallet shipping contact.
+     */
+    private function angelleye_ppcp_sync_wallet_tax_location($shipping_address) {
+        if (!function_exists('WC') || !WC()->customer || !WC()->cart) {
+            return;
+        }
+        // Mirrors WC_AJAX::update_order_review(), which is the same operation:
+        // apply an address, then reprice the cart. Its first act is to define
+        // WOOCOMMERCE_CHECKOUT, and wc-conditional-functions.php keys
+        // is_checkout() off that constant. Without it is_checkout() is false
+        // for everything running inside this wc-api request, so anything that
+        // supplies tax rates only in checkout context contributes nothing and
+        // the cart reprices to zero tax for an address that is taxed correctly
+        // on the checkout page.
+        wc_maybe_define_constant('WOOCOMMERCE_CHECKOUT', true);
+
+        if (isset($shipping_address['shippingDetails']) && is_array($shipping_address['shippingDetails'])) {
+            $shipping_address = $shipping_address['shippingDetails'];
+        }
+        if (!empty($shipping_address) && is_array($shipping_address)) {
+            $location = array(
+                'country' => strtoupper((string) ($shipping_address['countryCode'] ?? '')),
+                'state' => strtoupper((string) ($shipping_address['administrativeArea'] ?? '')),
+                'postcode' => (string) ($shipping_address['postalCode'] ?? ''),
+                'city' => (string) ($shipping_address['locality'] ?? ''),
+            );
+            // Skip empties: the wallet omits what the buyer has not supplied,
+            // and blanking a stored value widens the tax location.
+            $location = array_filter($location, function ($value) {
+                return '' !== $value;
+            });
+            $props = array();
+            foreach ($location as $key => $value) {
+                $props['shipping_' . $key] = wc_clean($value);
+            }
+            // update_order_review() sets both slots from the posted form; the
+            // wallet only gives us a delivery address, so mirror it into
+            // billing just when that is what tax is based on.
+            if ('billing' === get_option('woocommerce_tax_based_on')) {
+                foreach ($location as $key => $value) {
+                    $props['billing_' . $key] = wc_clean($value);
+                }
+            }
+            if (!empty($props)) {
+                WC()->customer->set_props($props);
+                WC()->customer->set_calculated_shipping(true);
+                WC()->customer->save();
+            }
+        }
+        // Shipping before totals, so methods that affect tax are chosen first.
+        WC()->cart->calculate_shipping();
+        WC()->cart->calculate_totals();
+    }
+
+    /**
+     * Copy a wallet-supplied contact into the posted checkout fields.
+     *
+     * process_checkout() reads $_POST, not the customer object, so this is the
+     * only way an Apple Pay address reaches the order.
+     *
+     * @param array|null $billing_address  Wallet billing contact.
+     * @param array|null $shipping_address Wallet shipping contact.
+     */
+    private function angelleye_ppcp_apply_wallet_address_to_post($billing_address, $shipping_address) {
+        $map = array(
+            'address_1' => 'addressLines.0',
+            'address_2' => 'addressLines.1',
+            'city' => 'locality',
+            'state' => 'administrativeArea',
+            'postcode' => 'postalCode',
+            'country' => 'countryCode',
+            'first_name' => 'givenName',
+            'last_name' => 'familyName',
+        );
+        $read = function ($source, $path) {
+            if (strpos($path, 'addressLines.') === 0) {
+                return $source['addressLines'][(int) substr($path, 13)] ?? '';
+            }
+            return $source[$path] ?? '';
+        };
+        $shipping_address = $shipping_address['shippingDetails'] ?? $shipping_address;
+        $billing_address = $billing_address['billingDetails'] ?? $billing_address;
+        $copied_shipping = 0;
+        foreach (array('billing' => $billing_address, 'shipping' => $shipping_address) as $prefix => $source) {
+            if (empty($source) || !is_array($source)) {
+                continue;
+            }
+            foreach ($map as $field => $path) {
+                $value = $read($source, $path);
+                if ('' === $value || null === $value) {
+                    continue;
+                }
+                if ('country' === $field || 'state' === $field) {
+                    $value = strtoupper($value);
+                }
+                $_POST[$prefix . '_' . $field] = wc_clean($value);
+                if ('shipping' === $prefix) {
+                    $copied_shipping ++;
+                }
+            }
+        }
+        if (!empty($shipping_address['emailAddress'])) {
+            $_POST['billing_email'] = wc_clean($shipping_address['emailAddress']);
+        }
+        // Without this WooCommerce copies billing over the shipping fields.
+        if ($copied_shipping > 0) {
+            $_POST['ship_to_different_address'] = 1;
+        }
+    }
+
+    /**
+     * Empties the cart for the plugin's own empty-and-re-add rebuild without
+     * destroying the in-flight PPCP checkout session.
+     *
+     * WC()->cart->empty_cart() fires woocommerce_cart_emptied, which is hooked to
+     * AngellEYE_PayPal_PPCP_Smart_Button::maybe_clear_session_data() so that a
+     * customer emptying their cart clears any stale PayPal session. During the
+     * internal idempotent re-add (create_order / shipping_address_update handlers)
+     * that listener must be suspended: the post-authorization shipping update
+     * otherwise wipes reference_id/paypal_order_id mid-payment and the capture
+     * fails with "_paypal_reference_id is missing in the update_order call.".
+     */
+    private function angelleye_ppcp_empty_cart_preserving_session() {
+        $smart_button = AngellEYE_PayPal_PPCP_Smart_Button::instance();
+        remove_action('woocommerce_cart_emptied', array($smart_button, 'maybe_clear_session_data'));
+        WC()->cart->empty_cart();
+        add_action('woocommerce_cart_emptied', array($smart_button, 'maybe_clear_session_data'));
     }
 
     public function angelleye_ppcp_download_zip_file($github_zip_url, $plugin_zip_path) {

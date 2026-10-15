@@ -55,6 +55,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
     public $angelleye_ppcp_currency;
     public $enable_product_button;
     public $enable_cart_button;
+    public $enable_funnelkit_cart_button;
     public $checkout_disable_smart_button;
     public $enable_mini_cart_button;
     public $disable_funding;
@@ -146,7 +147,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
         $this->advanced_card_payments_title = $this->setting_obj->get('advanced_card_payments_title', 'Credit Card');
         $this->advanced_card_payments_display_position = $this->setting_obj->get('advanced_card_payments_display_position', 'after');
         $this->enabled_pay_later_messaging = 'yes' === $this->setting_obj->get('enabled_pay_later_messaging', 'yes');
-        $is_domain_added = $this->setting_obj->get('apple_pay_domain_added', 'no') == 'yes';
+        $is_domain_added = angelleye_ppcp_is_apple_pay_domain_recorded();
         $this->enable_apple_pay = $this->enabled && $is_domain_added && 'yes' === $this->setting_obj->get('enable_apple_pay', 'no');
         $this->enable_google_pay = $this->enabled && 'yes' === $this->setting_obj->get('enable_google_pay', 'no');
         $this->pay_later_messaging_page_type = $this->setting_obj->get('pay_later_messaging_page_type', array('product', 'cart', 'payment'));
@@ -232,6 +233,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
         $this->angelleye_ppcp_currency_list = array('AUD', 'BRL', 'CAD', 'CZK', 'DKK', 'EUR', 'HKD', 'INR', 'ILS', 'JPY', 'MYR', 'MXN', 'TWD', 'NZD', 'NOK', 'PHP', 'PLN', 'GBP', 'RUB', 'SGD', 'SEK', 'CHF', 'THB', 'USD');
         $this->enable_product_button = 'yes' === $this->setting_obj->get('enable_product_button', 'yes');
         $this->enable_cart_button = 'yes' === $this->setting_obj->get('enable_cart_button', 'yes');
+        $this->enable_funnelkit_cart_button = 'yes' === $this->setting_obj->get('enable_funnelkit_cart_button', 'yes');
         $this->checkout_disable_smart_button = 'yes' === $this->setting_obj->get('checkout_disable_smart_button', 'no');
         $this->enable_mini_cart_button = 'yes' === $this->setting_obj->get('enable_mini_cart_button', 'yes');
     }
@@ -348,6 +350,8 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
                 add_action('woocommerce_proceed_to_checkout', array($this, 'display_paypal_button_cart_page'), 11);
             }
         }
+        // Always register FunnelKit Cart hook — sliding cart appears on all pages
+        add_action('fkcart_before_checkout_button', array($this, 'display_paypal_button_funnelkit_cart'), 11);
         if ($this->checkout_disable_smart_button === false) {
             add_action('woocommerce_pay_order_before_submit', array($this, 'display_paypal_button_checkout_page'), 100);
             add_action('woocommerce_review_order_before_submit', array($this, 'display_paypal_button_checkout_page'), 100);
@@ -409,6 +413,12 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
         // Currently, This is to support the applepay, so that we can pass the total amount to SDK popup
         add_filter('woocommerce_update_order_review_fragments', array($this, 'add_order_checkout_data_for_direct_checkouts'), 99);
 
+        // Include the fresh cart totals in add-to-cart AJAX responses so express buttons
+        // (Google Pay/Apple Pay) rendered off the cart page — e.g. in a sliding cart on the
+        // shop/archive/product pages — read the updated total instead of the stale page-load
+        // value, which otherwise triggered a false "your shopping cart seems to be empty" error.
+        add_filter('woocommerce_add_to_cart_fragments', array($this, 'add_order_checkout_data_for_direct_checkouts'), 99);
+
         // This is utilised on cart page to inform the shipping changes or cart total changes in frontend
         add_action('woocommerce_after_cart_totals', [$this, 'add_cart_data_in_html'], 99);
 
@@ -431,7 +441,12 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
             angelleye_ppcp_add_css_js();
         } elseif(is_product() && $this->enable_product_button) {
             angelleye_ppcp_add_css_js();
-        } elseif (is_cart() && !WC()->cart->is_empty() && $this->enable_cart_button) {
+        } elseif (is_cart() && WC()->cart && !WC()->cart->is_empty() && $this->enable_cart_button) {
+            angelleye_ppcp_add_css_js();
+        } elseif (class_exists('\FKCart\Plugin') && $this->enable_funnelkit_cart_button) {
+            // FunnelKit Cart is a floating widget visible on all frontend pages.
+            // Load the SDK everywhere so the button renders when the user adds items
+            // and opens the sliding cart, even on pages like the homepage or shop archive.
             angelleye_ppcp_add_css_js();
         }
     }
@@ -542,7 +557,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
         if (angelleye_ppcp_has_active_session() === true || angelleye_ppcp_is_subs_change_payment() === true) {
             if (is_product()) {
                 $page = 'product';
-            } else if (is_cart() && !WC()->cart->is_empty()) {
+            } else if (is_cart() && WC()->cart && !WC()->cart->is_empty()) {
                 $page = 'cart';
             } elseif (is_checkout_pay_page()) {
                 $page = 'checkout';
@@ -561,11 +576,10 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
                 array_push($enable_funding, 'ideal');
             }
 
-            if ($this->is_sandbox) {
-                if (is_user_logged_in() && WC()->customer && WC()->customer->get_billing_country() && 2 === strlen(WC()->customer->get_billing_country())) {
-                    $smart_js_arg['buyer-country'] = WC()->customer->get_billing_country();
-                }
+            if ($this->is_sandbox && WC()->customer && WC()->customer->get_billing_country() && 2 === strlen(WC()->customer->get_billing_country())) {
+                $smart_js_arg['buyer-country'] = WC()->customer->get_billing_country();
             }
+
             $product_cart_amounts = $this->payment_request->ae_get_updated_checkout_payment_data();
 
             $this->paymentaction = apply_filters('angelleye_ppcp_paymentaction', $this->paymentaction, null);
@@ -617,7 +631,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
                 $apple_pay_btn_selector['angelleye_ppcp_product_apple_pay'] = '#angelleye_ppcp_product_apple_pay';
                 $google_pay_btn_selector['angelleye_ppcp_product_shortcode_google_pay'] = '#angelleye_ppcp_product_shortcode_google_pay';
                 $google_pay_btn_selector['angelleye_ppcp_product_google_pay'] = '#angelleye_ppcp_product_google_pay';
-            } elseif (is_cart() && !WC()->cart->is_empty()) {
+            } elseif (is_cart() && WC()->cart && !WC()->cart->is_empty()) {
                 $page = 'cart';
                 if ($this->cart_button_position === 'top') {
                     $button_selector['angelleye_ppcp_cart_top'] = '#angelleye_ppcp_cart_top';
@@ -691,8 +705,21 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
                 }
                 $button_selector['angelleye_ppcp_checkout_shortcode'] = '#angelleye_ppcp_checkout_shortcode';
                 $product_cart_amounts['lineItems'] = $this->payment_request->getCartLineItems();
+            } elseif (class_exists('\FKCart\Plugin') && $this->enable_funnelkit_cart_button) {
+                // Support FunnelKit sliding cart on non-WC pages (shop, home, etc.)
+                $page = 'cart';
+                if (!is_null(WC()->cart) && !WC()->cart->is_empty()) {
+                    $product_cart_amounts['lineItems'] = $this->payment_request->getCartLineItems();
+                }
             } elseif (is_add_payment_method_page()) {
                 $page = 'add_payment_method';
+            }
+
+            // Register FunnelKit Cart selectors when FKCart is active and feature enabled
+            if (class_exists('\FKCart\Plugin') && $this->enable_funnelkit_cart_button) {
+                $button_selector['angelleye_ppcp_fkcart'] = '#angelleye_ppcp_fkcart';
+                $apple_pay_btn_selector['angelleye_ppcp_fkcart_apple_pay'] = '#angelleye_ppcp_fkcart_apple_pay';
+                $google_pay_btn_selector['angelleye_ppcp_fkcart_google_pay'] = '#angelleye_ppcp_fkcart_google_pay';
             }
 
             $smart_js_arg['commit'] = $this->angelleye_ppcp_is_skip_final_review() ? 'true' : 'false';
@@ -760,6 +787,17 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
             $google_pay_btn_selector = [];
         }
 
+        // Google Pay / Apple Pay do not support PayPal multi-seller mode (merchant-id=*).
+        // When multi-account routing resolves more than one payee for the current cart,
+        // suppress both wallets so the SDK does not fail with googlepay_config_error /
+        // "Not Eligible for GooglePay Payments". See https://github.com/angelleye/paypal-woocommerce/issues/2211
+        if (is_array($this->sdk_merchant_id) && count($this->sdk_merchant_id) > 1) {
+            $this->enable_google_pay = false;
+            $this->enable_apple_pay = false;
+            $google_pay_btn_selector = [];
+            $apple_pay_btn_selector = [];
+        }
+
         if ($this->enabled_pay_later_messaging) {
             array_push($components, 'messages');
         }
@@ -776,6 +814,22 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
             $smart_js_arg['components'] = apply_filters('angelleye_paypal_checkout_sdk_components', implode(',', $components));
         }
         $js_url = add_query_arg($smart_js_arg, 'https://www.paypal.com/sdk/js');
+
+        // On Order Pay there is no active shopping cart, so WC()->cart->total
+        // returns 0. The JS-side renderHostedButtons treats cart_total <= 0
+        // as the legacy free-trial flow and bails before mounting the SDK
+        // Card Fields. Use the order total on Order Pay so that guard
+        // recognises the real amount and the hosted fields mount.
+        $cart_total = WC()->cart->total;
+        if (is_checkout_pay_page()) {
+            global $wp;
+            if (isset($wp->query_vars['order-pay'])) {
+                $pay_order = wc_get_order(absint($wp->query_vars['order-pay']));
+                if ($pay_order) {
+                    $cart_total = $pay_order->get_total();
+                }
+            }
+        }
 
         wp_localize_script($ae_script_loader_handle, 'angelleye_ppcp_manager', array(
             'sandbox_mode' => (bool) $this->is_sandbox,
@@ -803,7 +857,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
             'cc_capture' => add_query_arg(array('angelleye_ppcp_action' => 'cc_capture', 'utm_nooverride' => '1'), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
             'create_order_url' => add_query_arg(array('angelleye_ppcp_action' => 'create_order', 'utm_nooverride' => '1', 'from' => is_checkout_pay_page() ? 'pay_page' : $page), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
             'shipping_update_url' => add_query_arg(array('angelleye_ppcp_action' => 'shipping_address_update', 'utm_nooverride' => '1', 'from' => is_checkout_pay_page() ? 'pay_page' : $page), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
-            'cart_total' => WC()->cart->total,
+            'cart_total' => $cart_total,
             'paymentaction' => $this->paymentaction,
             'payment_status_unconfirmed' => __('Payment status could not be confirmed. Check your order status before attempting another payment.', 'paypal-for-woocommerce'),
             'advanced_card_payments' => ($this->advanced_card_payments === true) ? 'yes' : 'no',
@@ -818,15 +872,50 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
             'button_selector' => $button_selector,
             'apple_pay_btn_selector' => $apple_pay_btn_selector ?? [],
             'google_pay_btn_selector' => $google_pay_btn_selector ?? [],
+            'fkcart_style' => array(
+                'style_color' => $this->setting_obj->get('funnelkit_cart_style_color', 'gold'),
+                'style_shape' => $this->setting_obj->get('funnelkit_cart_style_shape', 'rect'),
+                'style_label' => $this->setting_obj->get('funnelkit_cart_button_label', 'paypal'),
+                'style_layout' => $this->setting_obj->get('funnelkit_cart_button_layout', 'vertical'),
+                'style_height' => $this->setting_obj->get('funnelkit_cart_button_height', ''),
+                'style_tagline' => $this->setting_obj->get('funnelkit_cart_button_tagline', 'no'),
+                'disable_funding' => array_values((array) $this->setting_obj->get('funnelkit_cart_disallowed_funding_methods', array('card'))),
+                'google_pay_button_props' => array(
+                    'buttonColor' => $this->setting_obj->get('funnelkit_cart_google_style_color', 'default'),
+                    'buttonType' => $this->setting_obj->get('funnelkit_cart_google_button_type', 'plain'),
+                    'height' => $this->setting_obj->get('funnelkit_cart_google_button_height', ''),
+                ),
+                'apple_pay_button_props' => array(
+                    'buttonColor' => $this->setting_obj->get('funnelkit_cart_apple_style_color', 'black'),
+                    'buttonType' => $this->setting_obj->get('funnelkit_cart_apple_button_type', 'plain'),
+                    'height' => $this->setting_obj->get('funnelkit_cart_apple_button_height', ''),
+                ),
+            ),
             'advanced_card_payments_title' => $this->advanced_card_payments_title,
             'angelleye_cart_totals' => $product_cart_amounts,
             'update_cart_oncancel' => add_query_arg(array('angelleye_ppcp_action' => 'update_cart_oncancel', 'utm_nooverride' => '1',), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
-            'angelleye_ppcp_cc_setup_tokens' => add_query_arg(array('angelleye_ppcp_action' => 'angelleye_ppcp_cc_setup_tokens', 'utm_nooverride' => '1'), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
+            'angelleye_ppcp_cc_setup_tokens' => add_query_arg(array('angelleye_ppcp_action' => 'angelleye_ppcp_cc_setup_tokens', 'utm_nooverride' => '1', 'security' => wp_create_nonce('angelleye_ppcp_cc_setup_tokens')), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
             'advanced_credit_card_create_payment_token' => add_query_arg(array('angelleye_ppcp_action' => 'advanced_credit_card_create_payment_token', 'utm_nooverride' => '1', 'customer_id' => get_current_user_id()), untrailingslashit(WC()->api_request_url('AngellEYE_PayPal_PPCP_Front_Action'))),
             'constants' => [
                 'approval_token_id' => APPROVAL_TOKEN_ID_PARAM_NAME
             ],
-            'is_hide_place_order_button' => angelleye_ppcp_is_cart_contains_free_trial() || ($this->is_pre_order_item_in_cart() && $this->is_paypal_vault_used_for_pre_order() && $this->is_pre_order_charged_upon_release_in_cart()) ? 'no' : 'yes',
+            // Force-show Place Order whenever the cart total is $0 (the smart
+            // button bails at $0, so Place Order is the only entry point and
+            // routes through the trait's setup-tokens redirect flow for
+            // free-trial subscriptions). Also force-show for the pre-order
+            // vault charge-upon-release case where the smart button bails
+            // regardless of cart total. For carts with total > 0 the JS
+            // saved-token toggle in canShowPlaceOrderBtn() handles visibility.
+            //
+            // Use the resolved $cart_total (Order Pay-aware) rather than
+            // WC()->cart->total directly: on Order Pay the cart is empty
+            // so WC()->cart->total is 0, which would otherwise force the
+            // Place Order button visible alongside the smart button even
+            // when the order has a real amount.
+            'is_hide_place_order_button' => (
+                (float) $cart_total <= 0
+                || ($this->is_pre_order_item_in_cart() && $this->is_paypal_vault_used_for_pre_order() && $this->is_pre_order_charged_upon_release_in_cart())
+            ) ? 'no' : 'yes',
         ));
     }
 
@@ -839,6 +928,31 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
 
         if (!empty($this->apple_pay_button_props['height'])) {
             $customCss .= 'apple-pay-button{--apple-pay-button-height: ' . $this->apple_pay_button_props['height'] . 'px;}';
+        }
+        // Hide Apple Pay / Google Pay container divs inside FunnelKit sliding cart if those funding sources are disabled
+        // (PayPal-rendered iframes inside #angelleye_ppcp_fkcart are handled in JS via Buttons fundingSource — see renderSmartButton)
+        if (class_exists('\FKCart\Plugin') && $this->enable_funnelkit_cart_button) {
+            $fkcart_disable_funding = $this->setting_obj->get('funnelkit_cart_disallowed_funding_methods', array('card'));
+            if (!empty($fkcart_disable_funding) && is_array($fkcart_disable_funding)) {
+                $hideSelectors = array();
+                if (in_array('apple_pay', $fkcart_disable_funding, true) || in_array('applepay', $fkcart_disable_funding, true)) {
+                    $hideSelectors[] = '.fkcart-modal-container #angelleye_ppcp_fkcart_apple_pay';
+                    $hideSelectors[] = '.fkcart-modal #angelleye_ppcp_fkcart_apple_pay';
+                }
+                if (in_array('google_pay', $fkcart_disable_funding, true) || in_array('googlepay', $fkcart_disable_funding, true)) {
+                    $hideSelectors[] = '.fkcart-modal-container #angelleye_ppcp_fkcart_google_pay';
+                    $hideSelectors[] = '.fkcart-modal #angelleye_ppcp_fkcart_google_pay';
+                }
+                if (!empty($hideSelectors)) {
+                    $customCss .= implode(',', $hideSelectors) . '{display:none !important;}';
+                }
+            }
+        }
+        // Google Pay / Apple Pay are suppressed for multi-seller carts (see the merchant-id=* guard
+        // in enqueue_scripts); also hide their payment method rows on the checkout page so a dead
+        // gateway option is not shown. https://github.com/angelleye/paypal-woocommerce/issues/2211
+        if (is_array($this->sdk_merchant_id) && count($this->sdk_merchant_id) > 1) {
+            $customCss .= '.wc_payment_method.payment_method_angelleye_ppcp_google_pay, .payment_box.payment_method_angelleye_ppcp_google_pay, .wc_payment_method.payment_method_angelleye_ppcp_apple_pay, .payment_box.payment_method_angelleye_ppcp_apple_pay {display:none !important;}';
         }
         wp_add_inline_style($this->angelleye_ppcp_plugin_name, $customCss);
         if (is_account_page()) {
@@ -889,6 +1003,25 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
                 echo '<div class="angelleye_ppcp-button-container angelleye_ppcp_' . $this->style_layout . '_' . $this->style_size . '"><div id="angelleye_ppcp_cart"></div>' . ($this->enable_apple_pay ? '<div id="angelleye_ppcp_cart_apple_pay"></div>' : '') . ($this->enable_google_pay ? '<div id="angelleye_ppcp_cart_google_pay"></div>' : '') . $separator_html . '</div>';
             }
         }
+    }
+
+    public function display_paypal_button_funnelkit_cart() {
+        if (!$this->enable_funnelkit_cart_button) {
+            return false;
+        }
+        if (angelleye_ppcp_is_cart_subscription() && $this->enable_tokenized_payments === false) {
+            return false;
+        }
+        if ($this->is_pre_order_item_in_cart() && $this->is_paypal_vault_used_for_pre_order() && $this->is_pre_order_charged_upon_release_in_cart()) {
+            return false;
+        }
+        $this->angelleye_ppcp_smart_button_style_properties();
+        // Use FunnelKit-specific style for the container CSS class
+        $fkcart_layout = $this->setting_obj->get('funnelkit_cart_button_layout', 'vertical');
+        $fkcart_size = $this->setting_obj->get('funnelkit_cart_button_size', 'responsive');
+        // FunnelKit Cart handles empty cart state in cart-cta.php — always output the container
+        // so the button renders when items are added via AJAX fragment updates.
+        echo '<div class="angelleye_ppcp-button-container angelleye_ppcp_' . esc_attr($fkcart_layout) . '_' . esc_attr($fkcart_size) . '"><div id="angelleye_ppcp_fkcart"></div>' . ($this->enable_apple_pay ? '<div id="angelleye_ppcp_fkcart_apple_pay"></div>' : '') . ($this->enable_google_pay ? '<div id="angelleye_ppcp_fkcart_google_pay"></div>' : '') . '</div>';
     }
 
     public function display_paypal_button_cart_page_top() {
@@ -1830,7 +1963,7 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
         try {
             if (is_product()) {
                 $this->display_paypal_button_product_page($is_shortcode = 'yes');
-            } elseif (is_cart() && !WC()->cart->is_empty()) {
+            } elseif (is_cart() && WC()->cart && !WC()->cart->is_empty()) {
                 $this->display_paypal_button_cart_page($is_shortcode = 'yes');
             } elseif (is_checkout_pay_page()) {
                 $this->display_paypal_button_checkout_page($is_shortcode = 'yes');

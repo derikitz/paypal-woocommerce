@@ -22,7 +22,7 @@ function update_option($key, $value, $autoload = false) { global $options; $opti
 function delete_option($key) { global $options; unset($options[$key]); }
 $health_resets = $hooks = $checks = 0;
 function delete_transient($name) { global $health_resets; ++$health_resets; }
-function do_action($name, ...$args) { global $hooks; ++$hooks; }
+function do_action($name, ...$args) { global $hooks, $hook_args; ++$hooks; $hook_args = $args; }
 function expect_check($condition, $message) {
     global $checks;
     if (!$condition) { throw new RuntimeException($message); }
@@ -143,4 +143,7 @@ $payment->error_email_notification = false;
 $http_result = raw_response(204);
 expect_check($payment->angelleye_ppcp_void_authorized_payment('AUTH') === array('status' => 'VOIDED'), 'Void caller accepts documented no-content response');
 expect_check($payment->angelleye_ppcp_get_readable_message($token_error) === 'ID token transport failure', 'Normalized transport error works with existing readable-message caller');
+$parser->parse_response(raw_response(200, '{"id":"OBSERVED"}', array('paypal-debug-id' => 'observer-debug')), 'https://api-m.paypal.com/v2/checkout/orders/OBSERVED', array(), 'get_order');
+expect_check(($hook_args[3] ?? '') === 'observer-debug', 'Upstream observer receives debug ID as fourth argument');
+
 echo 'Passed ' . $checks . " response normalization checks.\n";

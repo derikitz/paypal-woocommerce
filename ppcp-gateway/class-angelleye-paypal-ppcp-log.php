@@ -79,7 +79,9 @@ class AngellEYE_PayPal_PPCP_Log {
             $message = array('action' => 'legacy_diagnostic_redacted',
                 'context' => basename($caller['file'] ?? ''), 'line' => $caller['line'] ?? 0);
         }
-        $this->logger->log($level, json_encode(self::redact($message)), array('source' => $source));
+        $format = isset($this->setting_obj) ? $this->setting_obj->get('log_format', 'json') : 'json';
+        $flags = $format === 'detailed' ? JSON_PRETTY_PRINT : 0;
+        $this->logger->log($level, json_encode(self::redact($message), $flags), array('source' => $source));
     }
 
     public function log($message, $level = 'info') {

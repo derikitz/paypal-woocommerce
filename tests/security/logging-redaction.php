@@ -101,4 +101,17 @@ $entry = end($logger->entries);
 check($entry['level'] === 'error', 'Malformed success recorded as error');
 check(strpos($entry['message'], 'INVALID_RESPONSE') !== false, 'Malformed response category retained');
 check(strpos($entry['message'], $secret) === false, 'Malformed HTML omitted');
+class FormatTestSettings extends WC_Gateway_PPCP_AngellEYE_Settings {
+    public $format;
+    public function get($name, $default) { return $name === 'log_format' ? $this->format : $default; }
+}
+$settings = new FormatTestSettings();
+$log->setting_obj = $settings;
+foreach (array('json', 'detailed') as $format) {
+    $settings->format = $format;
+    $log->log($payload, 'error');
+    $message = end($logger->entries)['message'];
+    check(strpos($message, $secret) === false && strpos($message, 'debug-123') !== false, 'Both upstream log formats redact first');
+    check((strpos($message, "\n") !== false) === ($format === 'detailed'), 'Selected diagnostic format applied');
+}
 echo "$checks logging redaction checks passed.\n";

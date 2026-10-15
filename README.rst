@@ -7,6 +7,11 @@ starting from plugin version 4.6.3. It extends WooCommerce with PayPal gateways,
 including PayPal Complete Payments, card fields, Apple Pay, Google Pay, vaulted
 payment methods, and legacy gateway integrations.
 
+The current upstream integration incorporates version 4.6.16. Merge resolutions
+retain this fork's TLS, OAuth, idempotency, capture outcome, log redaction and
+pay-page authorization changes. Upstream Blocks, wallet, refund and extension
+changes still require WordPress and PayPal sandbox integration testing.
+
 Changes here are maintained for this fork. Our workflow does not include sending
 pull requests to the upstream plugin. Upstream branding and attribution in the
 inherited source do not imply endorsement or support for this fork.

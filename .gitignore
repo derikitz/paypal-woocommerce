@@ -23,3 +23,6 @@ composer.lock
 
 # Local audit reference and implementation notes.
 /PAYPAL-AUDIT.md
+/node_modules/
+/paypal-for-woocommerce.zip
+CONTEXT.md

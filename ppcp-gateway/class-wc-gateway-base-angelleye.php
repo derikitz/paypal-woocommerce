@@ -38,10 +38,15 @@ trait WC_Gateway_Base_AngellEYE
             $subscriptionSupports = [];
         }
 
+        // Only advertise tokenization when the admin-side toggle is ON *and* the
+        // connected PayPal merchant actually has ADVANCED_VAULTING provisioned.
+        // Admin settings page is exempt so the option remains discoverable there
+        // even before vault is activated.
+        $is_admin_settings_page = isset($_GET['page']) && isset($_GET['tab']) && 'wc-settings' === $_GET['page'] && 'checkout' === $_GET['tab'];
+        $tokenization_available = $this->enable_tokenized_payments && angelleye_ppcp_is_vault_capability_available();
         if (isset($_GET['paypal_order_id']) && isset($_GET['paypal_payer_id']) && $this->enable_tokenized_payments) {
             $this->supports = array_merge($baseSupports, $subscriptionSupports);
-        } elseif ($this->enable_tokenized_payments ||
-            (isset($_GET['page']) && isset($_GET['tab']) && 'wc-settings' === $_GET['page'] && 'checkout' === $_GET['tab'])) {
+        } elseif ($tokenization_available || $is_admin_settings_page) {
             $this->supports = array_merge($baseSupports, $subscriptionSupports, array('tokenization'));
         } else {
             $this->supports = $baseSupports;
@@ -128,7 +133,7 @@ trait WC_Gateway_Base_AngellEYE
                 return $bool;
             }
         } else {
-            return apply_filters('angelleye_is_ppcp_parallel_payment_handle', true, $order_id, $this);
+            return apply_filters('angelleye_is_ppcp_parallel_payment_handle', true, $order_id, $this, $amount, $reason);
         }
     }
 }

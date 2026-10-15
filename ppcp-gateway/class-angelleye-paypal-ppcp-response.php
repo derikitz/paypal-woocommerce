@@ -9,6 +9,7 @@ class AngellEYE_PayPal_PPCP_Response {
     public $generate_signup_link_default_request_param;
     protected static $_instance = null;
     public $is_sandbox;
+    public $log_format;
 
     public static function instance() {
         if (is_null(self::$_instance)) {
@@ -57,7 +58,7 @@ class AngellEYE_PayPal_PPCP_Response {
             ),
         );
         $this->is_sandbox = 'yes' === $this->setting_obj->get('testmode', 'no');
-        add_action('angelleye_ppcp_request_respose_data', array($this, 'angelleye_ppcp_tpv_tracking'), 10, 3);
+        add_action('angelleye_ppcp_request_respose_data', array($this, 'angelleye_ppcp_tpv_tracking'), 10, 4);
     }
 
     public static function is_error($response) {
@@ -168,7 +169,7 @@ class AngellEYE_PayPal_PPCP_Response {
                     ) : $paypal_api_response;
                     $this->angelleye_ppcp_write_log($url, $request, $log_response_data, $action_name);
                     if (!self::is_error($response) && strpos($url, 'paypal.com') !== false) {
-                        do_action('angelleye_ppcp_request_respose_data', $request, $response, $action_name);
+                        do_action('angelleye_ppcp_request_respose_data', $request, $response, $action_name, $debug_id);
                     }
                 } catch (Throwable $ex) {
                     // An observer/logger failure must not replace a payment result.
@@ -178,6 +179,14 @@ class AngellEYE_PayPal_PPCP_Response {
         } catch (Throwable $ex) {
             return $this->failure('INVALID_RESPONSE', 'Unable to process the PayPal response.', 0);
         }
+    }
+
+    public function angelleye_ppcp_format_data($data) {
+        $data = AngellEYE_PayPal_PPCP_Log::redact($data);
+        if ($this->log_format === 'json') {
+            return wp_json_encode($data);
+        }
+        return wc_print_r($data, true);
     }
 
     public function angelleye_ppcp_write_log($url, $request, $response, $action_name = 'Exception') {
@@ -226,21 +235,20 @@ class AngellEYE_PayPal_PPCP_Response {
             }
             $this->setting_obj = WC_Gateway_PPCP_AngellEYE_Settings::instance();
             $this->api_log = AngellEYE_PayPal_PPCP_Log::instance();
+            $this->log_format = $this->setting_obj->get('log_format', 'detailed');
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' .$ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
         }
     }
 
-    public function angelleye_ppcp_tpv_tracking($request, $response, $action_name) {
+    public function angelleye_ppcp_tpv_tracking($request, $response, $action_name, $debug_id = '') {
         try {
             $allow_payment_event = array('capture_order', 'refund_order', 'authorize_order', 'void_authorized', 'capture_authorized');
             if (in_array($action_name, $allow_payment_event)) {
                 if (class_exists('AngellEYE_PFW_Payment_Logger')) {
                     $amount = '';
-                    $resource_id = '';
-        $resource_key = in_array($action_name, array('create_order', 'capture_order', 'authorize_order'), true) ? 'order_id' :
-            ($action_name === 'refund_order' ? 'refund_id' : 'transaction_id');
+                    $transaction_id = '';
                     if (isset($response['purchase_units']['0']['amount']['value'])) {
                         $amount = $response['purchase_units']['0']['amount']['value'];
                     } elseif (isset($response['amount']['value'])) {
@@ -253,6 +261,25 @@ class AngellEYE_PayPal_PPCP_Response {
                     } elseif (isset($response['id'])) {
                         $transaction_id = $response['id'];
                     }
+                    // capture_order: breakdown inside purchase_units[0].payments.captures[0]
+                    // capture_authorized: flat capture object with breakdown at top level
+                    // refund_order: flat refund object with seller_payable_breakdown at top level
+                    $capture = $response['purchase_units']['0']['payments']['captures'][0] ?? [];
+                    $breakdown = $capture['seller_receivable_breakdown']
+                        ?? $response['seller_receivable_breakdown']
+                        ?? $response['seller_payable_breakdown']
+                        ?? [];
+                    $currency = $response['purchase_units']['0']['amount']['currency_code']
+                        ?? $response['amount']['currency_code']
+                        ?? '';
+                    $custom_id = $capture['custom_id']
+                        ?? $response['purchase_units']['0']['custom_id']
+                        ?? $response['custom_id']
+                        ?? '';
+                    $invoice_id = $capture['invoice_id']
+                        ?? $response['purchase_units']['0']['invoice_id']
+                        ?? $response['invoice_id']
+                        ?? '';
                     $payment_logger = AngellEYE_PFW_Payment_Logger::instance();
                     $request_param['type'] = 'ppcp_' . $action_name;
                     $request_param['amount'] = $amount;
@@ -263,6 +290,13 @@ class AngellEYE_PayPal_PPCP_Response {
                     $request_param['correlation_id'] = '';
                     $request_param['transaction_id'] = $transaction_id;
                     $request_param['product_id'] = '1';
+                    $request_param['net_amount'] = $breakdown['net_amount']['value'] ?? '';
+                    $request_param['paypal_fee'] = $breakdown['paypal_fee']['value'] ?? '';
+                    $request_param['platform_fee'] = $breakdown['platform_fees'][0]['amount']['value'] ?? '';
+                    $request_param['currency'] = $currency;
+                    $request_param['custom_id'] = $custom_id;
+                    $request_param['invoice_id'] = $invoice_id;
+                    $request_param['debug_id'] = $debug_id;
                     $payment_logger->angelleye_tpv_request($request_param);
                 }
             }

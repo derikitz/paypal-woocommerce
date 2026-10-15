@@ -170,8 +170,7 @@ class AngellEYE_PayPal_PPCP_Seller_Onboarding {
                     if (isset($link['rel']) && 'action_url' === $link['rel']) {
                         $signup_link = isset($link['href']) ? $link['href'] : false;
                         if ($signup_link) {
-                            $url = add_query_arg($args, $signup_link);
-                            $this->angelleye_display_paypal_signup_button($url, 'paypal_onbard', 'multi_account');
+                            $this->angelleye_display_paypal_signup_button($signup_link, 'paypal_onbard', 'multi_account');
                         } else {
                             echo __('We could not properly connect to PayPal', '');
                         }
@@ -181,7 +180,9 @@ class AngellEYE_PayPal_PPCP_Seller_Onboarding {
                 return false;
             }
         } catch (Exception $ex) {
-
+            if (function_exists('angelleye_ppcp_log')) {
+                angelleye_ppcp_log('Error generating multi-account signup link for post ' . $post_id . ': ' . $ex->getMessage(), 'error');
+            }
         }
     }
 
@@ -380,7 +381,7 @@ class AngellEYE_PayPal_PPCP_Seller_Onboarding {
                 switch ($_GET['feature_activated']) {
                     case 'applepay':
                         set_transient('angelleye_ppcp_applepay_onboarding_done', 'yes', 29000);
-                        delete_transient('angelleye_apple_pay_domain_list_cache');
+                        angelleye_ppcp_clear_apple_pay_domain_cache();
                         $move_to_location = 'apple_pay_authorizations';
                         break;
                     case 'googlepay':
@@ -610,7 +611,7 @@ class AngellEYE_PayPal_PPCP_Seller_Onboarding {
                 }
                 $this->setting_obj->persist();
                 $this->result = $this->angelleye_track_seller_onboarding_status($seller_onboarding_status['merchant_id']);
-                if (!empty($this->result['primary_email'])) {
+                if (is_array($this->result) && !empty($this->result['primary_email'])) {
                     own_angelleye_sendy_list($this->result['primary_email']);
                 }
                 if (angelleye_is_acdc_payments_enable($this->result)) {

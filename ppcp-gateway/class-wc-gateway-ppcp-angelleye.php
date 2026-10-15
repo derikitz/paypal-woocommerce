@@ -53,7 +53,7 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
     public function setup_properties() {
         $this->icon = apply_filters('woocommerce_angelleye_paypal_checkout_icon', 'https://www.paypalobjects.com/webstatic/mktg/Logo/pp-logo-100px.png');
         $this->has_fields = true;
-        $this->method_title = apply_filters('angelleye_ppcp_gateway_method_title', sprintf('%s - Built by Angelleye', AE_PPCP_NAME));
+        $this->method_title = 'PayPal Complete Payments - by Angelleye';
         $this->method_description = __('The easiest one-stop solution for accepting PayPal, Venmo, Debit/Credit Cards with cheaper fees than other processors!', 'paypal-for-woocommerce');
     }
 
@@ -127,36 +127,48 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
 
     public function process_admin_options() {
         delete_transient(AE_FEE);
-        $cacheCleared = false;
-        $clearCache = function () {
+        $gateway_being_disabled = (!isset($_POST['woocommerce_angelleye_ppcp_enabled']) || $_POST['woocommerce_angelleye_ppcp_enabled'] == "0");
+        // Capture the previous test-mode value before the settings are saved below.
+        $oldSandboxMode = $this->get_option('testmode', 'no') == 'yes';
+        $newSandboxMode = isset($_POST['woocommerce_angelleye_ppcp_testmode']);
+
+        // Persist this gateway's own settings.
+        parent::process_admin_options();
+
+        // Clear FunnelKit Cart cache so frontend reflects PFW button changes immediately.
+        // FKCart's cache helper handles WP cache, WP Rocket, Autoptimize, W3TC, LiteSpeed,
+        // WP Fastest Cache, and WP Super Cache (used by SiteGround SG Optimizer).
+        if (class_exists('\FKCart\Admin\Admin_App') && method_exists('\FKCart\Admin\Admin_App', 'maybe_clear_cache')) {
+            \FKCart\Admin\Admin_App::maybe_clear_cache();
+        }
+
+        // IMPORTANT: this handler is inherited by the Apple Pay and Google Pay
+        // subscription gateways, which are all hooked to this same
+        // (woocommerce_update_options_payment_gateways_angelleye_ppcp) save action.
+        // The account-level cleanup below must run only for the primary gateway, and
+        // must NOT redirect/exit here — doing so aborts the remaining gateways' saves
+        // (whichever instance fired first would win), which is what previously kept
+        // Disconnect from ever persisting to woocommerce_angelleye_ppcp_settings.
+        if ($this->id !== 'angelleye_ppcp') {
+            return;
+        }
+
+        if ($gateway_being_disabled || $oldSandboxMode !== $newSandboxMode) {
             delete_option('ae_apple_pay_domain_reg_retries');
             delete_transient('ae_seller_onboarding_status');
-            delete_transient('angelleye_apple_pay_domain_list_cache');
-            return true;
-        };
-        if (!isset($_POST['woocommerce_angelleye_ppcp_enabled']) || $_POST['woocommerce_angelleye_ppcp_enabled'] == "0") {
-            // run the automatic domain remove feature
+            angelleye_ppcp_clear_apple_pay_domain_cache();
+        }
+
+        if ($gateway_being_disabled) {
+            // Best-effort Apple Pay domain removal. The settings were already saved
+            // above, so a slow or failed PayPal call here cannot undo the change; the
+            // \Throwable guard also keeps any error from bubbling up.
             try {
                 AngellEYE_PayPal_PPCP_Apple_Pay_Configurations::autoUnRegisterDomain();
-            } catch (Exception $exception) {
-                $this->api_log->log("The exception was created on line: " . $exception->getFile() . ' ' .$exception->getLine(), 'error');
+            } catch (\Throwable $exception) {
+                $this->api_log->log("The exception was created on line: " . $exception->getFile() . ' ' . $exception->getLine(), 'error');
                 $this->api_log->log($exception->getMessage(), 'error');
             }
-            $cacheCleared = $clearCache();
-        } else {
-            $oldSandboxMode = $this->get_option('testmode', 'no') == 'yes';
-            $newSandboxMode = isset($_POST['woocommerce_angelleye_ppcp_testmode']);
-            if ($oldSandboxMode != $newSandboxMode) {
-                $cacheCleared = $clearCache();
-            }
-        }
-        parent::process_admin_options();
-        if ($cacheCleared) {
-            if (ob_get_length()) {
-                ob_end_clean();
-            }
-            wp_redirect(admin_url('admin.php?page=wc-settings&tab=checkout&section=angelleye_ppcp'));
-            die;
         }
     }
 
@@ -386,7 +398,15 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
             }
             $this->paymentaction = apply_filters('angelleye_ppcp_paymentaction', $this->paymentaction, $woo_order_id);
             $order = wc_get_order($woo_order_id);
-            $angelleye_ppcp_paypal_order_id = AngellEye_Session_Manager::get('paypal_order_id');
+            $angelleye_ppcp_paypal_order_id = !empty($_POST['paypal_order_id'])
+                ? wc_clean(wp_unslash($_POST['paypal_order_id']))
+                : AngellEye_Session_Manager::get('paypal_order_id');
+            if (!empty($_POST['paypal_order_id']) && !empty($angelleye_ppcp_paypal_order_id)) {
+                // Blocks carries the PayPal order id through paymentMethodData rather
+                // than the WC session. Downstream capture/update calls still read the
+                // session value, so write it back here.
+                AngellEye_Session_Manager::set('paypal_order_id', $angelleye_ppcp_paypal_order_id);
+            }
             $angelleye_ppcp_payment_method_title = AngellEye_Session_Manager::get('payment_method_title');
             $angelleye_ppcp_used_payment_method = AngellEye_Session_Manager::get('used_payment_method');
             $order->update_meta_data('_angelleye_ppcp_used_payment_method', $angelleye_ppcp_used_payment_method);
@@ -431,11 +451,25 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
                 } elseif ( $redirect = $this->handle_overcharge_redirect( $is_success ) ) {
 	                return $redirect;
                 }
+                if (angelleye_ppcp_is_store_api_request()) {
+                    AngellEye_Session_Manager::clear();
+                    wc_add_notice(__('Unfortunately your payment could not be completed. Please try again.', 'paypal-for-woocommerce'), 'error');
+                    return array(
+                        'result'   => 'failure',
+                        'redirect' => wc_get_checkout_url(),
+                    );
+                }
                 exit();
             } else {
                 if (isset($_GET['from']) && 'checkout' === $_GET['from']) {
                     AngellEye_Session_Manager::set('checkout_post', isset($_POST) ? $_POST : false);
                     $this->payment_request->angelleye_ppcp_create_order_request($woo_order_id);
+                    if (angelleye_ppcp_is_store_api_request()) {
+                        return array(
+                            'result'   => 'failure',
+                            'redirect' => '',
+                        );
+                    }
                     exit();
                 } elseif (!empty($angelleye_ppcp_paypal_order_id)) {
                     $order = wc_get_order($woo_order_id);
@@ -479,18 +513,38 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
                     if (ob_get_length()) {
                         ob_end_clean();
                     }
+                    if (!is_array($result)) {
+                        return array(
+                            'result'   => 'failure',
+                            'redirect' => wc_get_checkout_url(),
+                        );
+                    }
                     return $result;
                 } else {
                     $result = $this->payment_request->angelleye_ppcp_regular_create_order_request($woo_order_id, $return_url = true);
                     if (ob_get_length()) {
                         ob_end_clean();
                     }
+                    if (!is_array($result)) {
+                        return array(
+                            'result'   => 'failure',
+                            'redirect' => wc_get_checkout_url(),
+                        );
+                    }
                     return $result;
                 }
             }
         } catch (Exception $ex) {
-
+            if (isset($this->payment_request->api_log)) {
+                $this->payment_request->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
+                $this->payment_request->api_log->log($ex->getMessage(), 'error');
+            }
+            wc_add_notice($ex->getMessage(), 'error');
         }
+        return array(
+            'result'   => 'failure',
+            'redirect' => wc_get_checkout_url(),
+        );
     }
 
 	protected function handle_overcharge_redirect( $is_success ) {
@@ -584,7 +638,7 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
                 return $bool;
             }
         } else {
-            return apply_filters('angelleye_is_ppcp_parallel_payment_handle', true, $order_id, $this);
+            return apply_filters('angelleye_is_ppcp_parallel_payment_handle', true, $order_id, $this, $amount, $reason);
         }
     }
 
@@ -893,7 +947,7 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
             }
             $is_enabled = $this->get_option($key);
             $is_domain_added_new = false;
-            $is_domain_added = $this->get_option('apple_pay_domain_added', null) == 'yes';
+            $is_domain_added = angelleye_ppcp_is_apple_pay_domain_recorded();
             $is_apple_pay_approved = $data['is_apple_pay_approved'] ?? false;
             $is_apple_pay_enabled = $data['is_apple_pay_enable'] ?? false;
             $is_ppcp_connected = $data['is_ppcp_connected'] ?? false;
@@ -903,14 +957,9 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
             }
             $is_disabled = $data['disabled'] || isset($data['custom_attributes']['disabled']) || !$is_domain_added_new || !$is_apple_pay_approved;
 
-            if ($is_domain_added == null || $is_domain_added_new != $is_domain_added) {
-                if ($is_domain_added_new) {
-                    $is_domain_added = true;
-                    $this->update_option('apple_pay_domain_added', 'yes');
-                } else {
-                    $is_domain_added = false;
-                    $this->update_option('apple_pay_domain_added', 'no');
-                }
+            if ($is_domain_added_new != $is_domain_added) {
+                $is_domain_added = (bool) $is_domain_added_new;
+                angelleye_ppcp_record_apple_pay_domain_added($is_domain_added);
             }
             ob_start();
             ?>

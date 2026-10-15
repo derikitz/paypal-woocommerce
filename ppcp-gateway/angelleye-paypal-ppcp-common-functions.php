@@ -1,4 +1,52 @@
 <?php
+if (!function_exists('angelleye_ppcp_is_local_pickup_chosen')) {
+
+    /**
+     * Detect whether the customer has chosen WooCommerce Local Pickup as the
+     * shipping method. When pickup is chosen, the PayPal order must use
+     * shipping_preference = NO_SHIPPING and omit purchase_units[].shipping
+     * to avoid binding the seller to free shipping under PayPal Seller
+     * Protection rules.
+     *
+     * @param WC_Order|null $order Optional WC order. When provided, reads
+     *                             the order's shipping items. Otherwise reads
+     *                             the WC session's chosen_shipping_methods.
+     * @return bool True only when ALL chosen shipping methods are local_pickup.
+     */
+    function angelleye_ppcp_is_local_pickup_chosen($order = null) {
+        // Order context (pay_page / capture / authorize)
+        if ($order instanceof WC_Order) {
+            $shipping_items = $order->get_shipping_methods();
+            if (empty($shipping_items)) {
+                return false;
+            }
+            foreach ($shipping_items as $item) {
+                $method_id = $item->get_method_id();
+                if ($method_id !== 'local_pickup') {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Session context (cart / checkout / product / FKCart)
+        if (!function_exists('WC') || !WC()->session) {
+            return false;
+        }
+        $chosen = WC()->session->get('chosen_shipping_methods');
+        if (empty($chosen) || !is_array($chosen)) {
+            return false;
+        }
+        foreach ($chosen as $rate_id) {
+            // Rate IDs look like "local_pickup:3"; method ID is the prefix
+            if (strpos((string) $rate_id, 'local_pickup') !== 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
 if (!function_exists('angelleye_ppcp_remove_empty_key')) {
 
     function angelleye_ppcp_remove_empty_key($data) {
@@ -56,6 +104,24 @@ if (!function_exists('angelleye_ppcp_get_post_meta')) {
             }
         }
         return $order_meta_value;
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_get_partner_attribution_id')) {
+
+    /**
+     * Resolve the BN code (PayPal partner attribution id) for this
+     * install. Defaults to the PAYPAL_PARTNER_ATTRIBUTION_ID constant
+     * defined in paypal-for-woocommerce.php. Exposed via filter so
+     * multi-account plugins / white-label installations can override
+     * per site.
+     *
+     * @return string The BN code, or '' when none configured.
+     */
+    function angelleye_ppcp_get_partner_attribution_id() {
+        $default = defined('PAYPAL_PARTNER_ATTRIBUTION_ID') ? PAYPAL_PARTNER_ATTRIBUTION_ID : '';
+        return (string) apply_filters('angelleye_paypal_partner_attribution_id', $default);
     }
 
 }
@@ -806,16 +872,43 @@ if (!function_exists('angelleye_ppcp_is_cart_subscription')) {
 
 }
 
+if (!function_exists('angelleye_ppcp_is_store_api_request')) {
+
+    /**
+     * Detect whether the current request is being served by the WooCommerce
+     * Store API (Blocks checkout). Used to guard exit()/false returns that
+     * are incompatible with the REST request lifecycle while keeping the
+     * classic-checkout behavior byte-identical.
+     */
+    function angelleye_ppcp_is_store_api_request() {
+        if (defined('REST_REQUEST') && REST_REQUEST) {
+            return true;
+        }
+        if (!empty($_SERVER['REQUEST_URI'])
+            && false !== strpos((string) $_SERVER['REQUEST_URI'], '/wc/store/')) {
+            return true;
+        }
+        return false;
+    }
+
+}
+
 if (!function_exists('angelleye_ppcp_is_save_payment_method')) {
 
     function angelleye_ppcp_is_save_payment_method($enable_tokenized_payments) {
+        // Safety net: never vault when the admin toggle is off, or when the PayPal
+        // merchant account doesn't actually have ADVANCED_VAULTING provisioned.
+        // This catches POST-checkbox tampering and filter-injected overrides.
+        if ($enable_tokenized_payments !== true || !angelleye_ppcp_is_vault_capability_available()) {
+            return apply_filters('angelleye_ppcp_is_save_payment_method', false);
+        }
         $is_enable = false;
         $new_payment_methods_to_check = [
             'wc-angelleye_ppcp-new-payment-method',
             'wc-angelleye_ppcp_cc-new-payment-method',
             'wc-angelleye_ppcp_apple_pay-new-payment-method'
         ];
-        if (angelleye_ppcp_is_cart_subscription() && $enable_tokenized_payments === true) {
+        if (angelleye_ppcp_is_cart_subscription()) {
             $is_enable = true;
         }
         foreach ($new_payment_methods_to_check as $item) {
@@ -824,8 +917,125 @@ if (!function_exists('angelleye_ppcp_is_save_payment_method')) {
                 break;
             }
         }
+        // When tokenization is enabled and request originates from product/cart page
+        // (or checkout_top), the save-payment-method checkbox is not in the serialized
+        // form data. Force vault so the token is stored with the order.
+        if (!$is_enable) {
+            $request_from = isset($_GET['from']) ? sanitize_text_field($_GET['from']) : '';
+            if (!in_array($request_from, array('checkout', 'pay_page'), true)) {
+                $is_enable = true;
+            }
+        }
 
         return apply_filters('angelleye_ppcp_is_save_payment_method', $is_enable);
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_apple_pay_account_scope')) {
+
+    /**
+     * Identifies the connected PayPal account, so Apple Pay domain state
+     * cannot be carried over from a previously connected one.
+     *
+     * @return string
+     */
+    function angelleye_ppcp_apple_pay_account_scope() {
+        $settings = WC_Gateway_PPCP_AngellEYE_Settings::instance();
+        $is_sandbox = 'yes' === $settings->get('testmode', 'no');
+        $merchant_id = $is_sandbox
+                ? $settings->get('sandbox_merchant_id', '')
+                : $settings->get('live_merchant_id', '');
+        return substr(md5(($is_sandbox ? 'sandbox' : 'live') . '|' . $merchant_id), 0, 12);
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_apple_pay_domain_cache_key')) {
+
+    function angelleye_ppcp_apple_pay_domain_cache_key() {
+        return 'angelleye_apple_pay_domain_list_cache_' . angelleye_ppcp_apple_pay_account_scope();
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_clear_apple_pay_domain_cache')) {
+
+    function angelleye_ppcp_clear_apple_pay_domain_cache() {
+        delete_transient(angelleye_ppcp_apple_pay_domain_cache_key());
+        // Pre-scoping key, still present on existing installs.
+        delete_transient('angelleye_apple_pay_domain_list_cache');
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_is_apple_pay_domain_recorded')) {
+
+    /**
+     * Whether the domain is recorded as registered for the account connected
+     * right now. A flag left behind by a different account does not count.
+     *
+     * @return bool
+     */
+    function angelleye_ppcp_is_apple_pay_domain_recorded() {
+        $settings = WC_Gateway_PPCP_AngellEYE_Settings::instance();
+        if ('yes' !== $settings->get('apple_pay_domain_added', 'no')) {
+            return false;
+        }
+        $recorded_account = $settings->get('apple_pay_domain_added_account', '');
+        // Installs upgrading from before the flag was scoped have no account
+        // recorded against it. Honour the existing flag so a working Apple Pay
+        // is not switched off by the upgrade; the settings page stamps the
+        // connected account the next time it reconciles.
+        if ('' === $recorded_account) {
+            return true;
+        }
+        return $recorded_account === angelleye_ppcp_apple_pay_account_scope();
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_record_apple_pay_domain_added')) {
+
+    /**
+     * @param bool $is_added
+     */
+    function angelleye_ppcp_record_apple_pay_domain_added($is_added) {
+        $key = 'woocommerce_angelleye_ppcp_settings';
+        $settings = get_option($key, array());
+        if (!is_array($settings)) {
+            $settings = array();
+        }
+        $settings['apple_pay_domain_added'] = $is_added ? 'yes' : 'no';
+        $settings['apple_pay_domain_added_account'] = $is_added ? angelleye_ppcp_apple_pay_account_scope() : '';
+        update_option($key, $settings);
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_is_apple_pay_recurring_token')) {
+
+    /**
+     * Whether the Apple Pay token for this checkout is a recurring merchant
+     * token rather than a one-time token.
+     *
+     * This has to stay in lockstep with addPaymentMethodSaveParams() in
+     * wc-gateway-ppcp-angelleye-apple-pay.js. The browser decides which kind of
+     * token to ask Apple for, and PayPal rejects applepay.confirmOrder() when
+     * the order's stored_credential disagrees with the token it is handed. It
+     * deliberately does not reuse angelleye_ppcp_is_save_payment_method(),
+     * which also honours the PayPal and card gateways' save checkboxes and
+     * force-enables vaulting off the checkout page - neither of which the
+     * Apple Pay button looks at.
+     *
+     * @return bool
+     */
+    function angelleye_ppcp_is_apple_pay_recurring_token() {
+        if (angelleye_ppcp_is_cart_subscription()) {
+            return true;
+        }
+        return isset($_POST['wc-angelleye_ppcp_apple_pay-new-payment-method'])
+                && 'true' === $_POST['wc-angelleye_ppcp_apple_pay-new-payment-method'];
     }
 
 }
@@ -927,6 +1137,12 @@ if (!function_exists('angelleye_ppcp_account_ready_to_paid')) {
         $args['headers']['Authorization'] = 'Bearer ' . $access_token;
         $args['redirection'] = 0;
         $args['sslverify'] = true;
+        // Partner attribution (BN code) on the admin "Test credentials"
+        // ping so PayPal's attribution reporting sees this call too.
+        $bn_code = angelleye_ppcp_get_partner_attribution_id();
+        if ($bn_code !== '') {
+            $args['headers']['PayPal-Partner-Attribution-Id'] = $bn_code;
+        }
         $result = wp_remote_post($paypal_order_api, $args);
         $body = wp_remote_retrieve_body($result);
         $response = !empty($body) ? json_decode($body, true) : '';
@@ -947,11 +1163,93 @@ if (!function_exists('angelleye_is_vaulting_enable')) {
                 if ($product['name'] === 'ADVANCED_VAULTING' &&
                         isset($product['vetting_status']) && $product['vetting_status'] === 'SUBSCRIBED' &&
                         isset($product['capabilities']) && in_array('PAYPAL_WALLET_VAULTING_ADVANCED', $product['capabilities'])) {
-                    return true;
+                    return angelleye_ppcp_has_vault_scope($result);
                 }
             }
         }
         return false;
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_has_vault_scope')) {
+
+    /**
+     * Checks that the merchant granted us the vault permission.
+     * PayPal returns 403 on vault calls without it, even when ADVANCED_VAULTING is subscribed.
+     */
+    function angelleye_ppcp_has_vault_scope($result) {
+        if (empty($result['oauth_integrations']) || !is_array($result['oauth_integrations'])) {
+            return true;
+        }
+        $partner_client_ids = array_filter([
+            defined('PAYPAL_PPCP_PARTNER_CLIENT_ID') ? PAYPAL_PPCP_PARTNER_CLIENT_ID : '',
+            defined('PAYPAL_PPCP_SANDBOX_PARTNER_CLIENT_ID') ? PAYPAL_PPCP_SANDBOX_PARTNER_CLIENT_ID : '',
+        ]);
+        $found_our_integration = false;
+        foreach ($result['oauth_integrations'] as $integration) {
+            if (($integration['integration_type'] ?? '') !== 'OAUTH_THIRD_PARTY' || empty($integration['oauth_third_party'])) {
+                continue;
+            }
+            foreach ((array) $integration['oauth_third_party'] as $third_party) {
+                if (!in_array($third_party['partner_client_id'] ?? '', $partner_client_ids, true)) {
+                    continue;
+                }
+                $found_our_integration = true;
+                if (in_array('https://uri.paypal.com/services/vault/payment-tokens/readwrite', (array) ($third_party['scopes'] ?? []), true)) {
+                    return true;
+                }
+            }
+        }
+        // Not connected through our partner app (e.g. own API credentials), nothing to check.
+        return !$found_our_integration;
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_is_vault_capability_available')) {
+
+    /**
+     * Returns whether ADVANCED_VAULTING is active on the connected PayPal merchant.
+     *
+     * Layered caching, cheapest-first:
+     *   1. Per-request static cache — repeated calls in one request cost nothing.
+     *   2. `ae_seller_onboarding_status` transient (1-day TTL) — shared across
+     *      requests; populated by admin settings / here on first miss.
+     *   3. PayPal Partner API — called only when the transient is missing or
+     *      expired, and the result re-primes the transient for the next day.
+     *
+     * This keeps frontend page loads free of API calls in steady state while
+     * still recovering automatically after the cache expires.
+     */
+    function angelleye_ppcp_is_vault_capability_available() {
+        static $cached = null;
+        if ($cached !== null) {
+            return $cached;
+        }
+        // Fail closed if invoked before plugin bootstrap defines paths/constants
+        // (e.g. another plugin instantiates the gateway unusually early).
+        if (!defined('PAYPAL_FOR_WOOCOMMERCE_PLUGIN_DIR')) {
+            return $cached = false;
+        }
+        if (!class_exists('WC_Gateway_PPCP_AngellEYE_Settings')) {
+            include_once PAYPAL_FOR_WOOCOMMERCE_PLUGIN_DIR . '/ppcp-gateway/class-wc-gateway-ppcp-angelleye-settings.php';
+        }
+        $settings = WC_Gateway_PPCP_AngellEYE_Settings::instance();
+        $is_sandbox = 'yes' === $settings->get('testmode', 'no');
+        $merchant_id = $settings->get($is_sandbox ? 'sandbox_merchant_id' : 'live_merchant_id', '');
+        if (empty($merchant_id)) {
+            return $cached = false;
+        }
+        if (!class_exists('AngellEYE_PayPal_PPCP_Seller_Onboarding')) {
+            include_once PAYPAL_FOR_WOOCOMMERCE_PLUGIN_DIR . '/ppcp-gateway/class-angelleye-paypal-ppcp-seller-onboarding.php';
+        }
+        $result = AngellEYE_PayPal_PPCP_Seller_Onboarding::instance()
+            ->angelleye_track_seller_onboarding_status_from_cache($merchant_id, false);
+        if (!is_array($result)) {
+            return $cached = false;
+        }
+        return $cached = angelleye_is_vaulting_enable($result);
     }
 
 }
@@ -1374,6 +1672,40 @@ if (!function_exists('angelleye_get_matched_shortcode_attributes')) {
             }
         }
         return $out;
+    }
+
+}
+
+if (!function_exists('angelleye_ppcp_trigger_payment_successful_result')) {
+
+    /**
+     * Apply WooCommerce's `woocommerce_payment_successful_result` filter for PPCP
+     * direct-capture paths that bypass WC_Checkout::process_order_payment().
+     *
+     * Some PPCP smart-button flows (CC, Apple Pay, Google Pay, PayPal Wallet) capture
+     * payment via a custom AJAX endpoint instead of the standard checkout submit, so
+     * WooCommerce never applies this filter for them. Plugins such as Germanized for
+     * WooCommerce hook that filter to send the order confirmation email immediately on
+     * order placement; without this call, those integrations are silent for cards/wallets.
+     *
+     * A per-request static guard prevents firing twice for the same order within one
+     * request, which would otherwise risk a duplicate confirmation email if a future
+     * code path also reaches WC_Checkout::process_order_payment() for the same order.
+     *
+     * @param array        $result Payment result array (must contain 'result' and 'redirect').
+     * @param int|WC_Order $order  Order or order ID.
+     * @return array Filtered result array.
+     */
+    function angelleye_ppcp_trigger_payment_successful_result($result, $order) {
+        static $fired = array();
+
+        $order_id = is_a($order, 'WC_Order') ? $order->get_id() : (int) $order;
+        if (!$order_id || isset($fired[$order_id])) {
+            return $result;
+        }
+        $fired[$order_id] = true;
+
+        return apply_filters('woocommerce_payment_successful_result', $result, $order_id);
     }
 
 }

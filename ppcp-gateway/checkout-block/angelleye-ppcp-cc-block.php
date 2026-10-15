@@ -15,6 +15,14 @@ final class AngellEYE_PPCP_CC_Block extends AbstractPaymentMethodType {
     }
 
     public function is_active() {
+        // See angelleye-ppcp-checkout-block.php::is_active() for the same
+        // rationale: parent gateway classes are loaded lazily via the
+        // woocommerce_payment_gateways filter, and Blocks can call is_active()
+        // from script-dependency hooks on pages where WC never boots its
+        // gateways (e.g. wp-login.php under WP Defender Mask Login).
+        if (!class_exists('WC_Gateway_CC_AngellEYE')) {
+            return false;
+        }
         $this->gateway = new WC_Gateway_CC_AngellEYE();
         return $this->gateway->is_available();
     }
@@ -25,11 +33,26 @@ final class AngellEYE_PPCP_CC_Block extends AbstractPaymentMethodType {
         }
         $this->pay_later = AngellEYE_PayPal_PPCP_Pay_Later::instance();
         wp_register_style('angelleye_ppcp', PAYPAL_FOR_WOOCOMMERCE_ASSET_URL . 'ppcp-gateway/css/wc-gateway-ppcp-angelleye-public.css', array(), $this->version, 'all');
-        wp_register_script('angelleye_ppcp_cc-blocks-integration', PAYPAL_FOR_WOOCOMMERCE_ASSET_URL . 'ppcp-gateway/checkout-block/ppcp-cc.js', array(), VERSION_PFW, true);
+
+        // See angelleye-ppcp-checkout-block.php for the full rationale.
+        // Pulls in common-functions, script-loader, public.js, apple-pay
+        // and google-pay so angelleyeOrder, angelleye_ppcp_manager, and
+        // the GooglePayCheckoutButton / ApplePayCheckoutButton classes
+        // are all defined before the React useEffect in ppcp-cc.js fires.
+        angelleye_ppcp_add_css_js();
+
+        // wc-blocks-checkout / wc-blocks-data-store are required because
+        // ppcp-cc.js reads wc.blocksCheckout and wc.wcBlocksData; WC now
+        // emits a "dependency-missing" warning when they're not declared.
+        wp_register_script('angelleye_ppcp_cc-blocks-integration', PAYPAL_FOR_WOOCOMMERCE_ASSET_URL . 'ppcp-gateway/checkout-block/ppcp-cc.js', array('jquery', 'wc-blocks-registry', 'wc-blocks-checkout', 'wc-blocks-data-store', 'wc-settings', 'wp-element', 'wp-i18n'), VERSION_PFW, true);
         if (angelleye_ppcp_has_active_session()) {
             $order_button_text = apply_filters('angelleye_ppcp_cc_order_review_page_place_order_button_text', __('Confirm Your PayPal Order', 'paypal-for-woocommerce'));
         } else {
-            $order_button_text = 'Proceed to PayPal';
+            // PPCP-CC renders hosted card fields inline — the customer enters
+            // the card here and the capture happens in-flow, so this button
+            // should read "Place order" (Blocks default), not "Proceed to
+            // PayPal" (which belongs to the redirect-based smart button).
+            $order_button_text = apply_filters('angelleye_ppcp_cc_place_order_button_text', __('Place order', 'paypal-for-woocommerce'));
         }
         $is_paylater_enable_incart_page = 'no';
         if ($this->pay_later->is_paypal_pay_later_messaging_enable_for_page($page = 'cart') && $this->pay_later->pay_later_messaging_cart_shortcode === false) {
@@ -41,7 +64,7 @@ final class AngellEYE_PPCP_CC_Block extends AbstractPaymentMethodType {
         $is_pay_page = '';
         if (is_product()) {
             $page = 'product';
-        } else if (is_cart() && !WC()->cart->is_empty()) {
+        } else if (is_cart() && WC()->cart && !WC()->cart->is_empty()) {
             $page = 'cart';
         } elseif (is_checkout_pay_page()) {
             $page = 'checkout';
@@ -60,7 +83,11 @@ final class AngellEYE_PPCP_CC_Block extends AbstractPaymentMethodType {
         if (function_exists('wp_set_script_translations')) {
             wp_set_script_translations('angelleye_ppcp_cc-blocks-integration', 'paypal-for-woocommerce');
         }
-        wp_enqueue_script('angelleye_ppcp_cc');
+        // Note: a previous wp_enqueue_script('angelleye_ppcp_cc') here was a
+        // no-op — no script is registered under that handle anywhere in the
+        // plugin. The real handles (angelleye_ppcp, angelleye_ppcp-apple-pay,
+        // angelleye_ppcp-google-pay, etc.) are already enqueued by the
+        // angelleye_ppcp_add_css_js() call above.
         if (angelleye_ppcp_has_active_session() === false && $page === 'cart') {
             do_action('angelleye_ppcp_cc_woo_cart_block_pay_later_message');
         }
