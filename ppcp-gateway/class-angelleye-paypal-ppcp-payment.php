@@ -166,7 +166,9 @@ class AngellEYE_PayPal_PPCP_Payment {
     }
 
     public function angelleye_ppcp_create_order_request($woo_order_id = null) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($woo_order_id, 'create_order', '');
             $return_response = [];
             if (angelleye_ppcp_get_order_total($woo_order_id) === 0) {
                 $wc_notice = __('Sorry, your session has expired.', 'paypal-for-woocommerce');
@@ -181,7 +183,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 $cart = $this->angelleye_ppcp_get_details_from_order($woo_order_id);
             }
             $decimals = $this->angelleye_ppcp_get_number_of_decimal_digits();
-            $reference_id = wc_generate_order_key();
+            $reference_id = $operation->reference();
             AngellEye_Session_Manager::set('reference_id', $reference_id);
             $payment_method = wc_clean(!empty($_POST['angelleye_ppcp_payment_method_title']) ? $_POST['angelleye_ppcp_payment_method_title'] : '');
             $payment_method_id = wc_clean(!empty($_POST['payment_method']) ? $_POST['payment_method'] : '');
@@ -444,6 +446,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
@@ -1001,23 +1007,32 @@ class AngellEYE_PayPal_PPCP_Payment {
         return $body_request;
     }
 
+    private function begin_payment_operation($order_id, $action, $resource = '') {
+        $order = $order_id ? wc_get_order($order_id) : null;
+        $identity = $order_id ? 'order:' . $order_id : '';
+        if (!$identity && function_exists('WC') && WC()->session) {
+            $identity = 'session:' . WC()->session->get_customer_id();
+        }
+        if (!$identity || $identity === 'session:') {
+            throw new RuntimeException('A persistent checkout session or order is required for this PayPal operation.');
+        }
+        $generation = array();
+        if (in_array($action, array('refund_order', 'capture_authorized'), true) && $order) {
+            $progress = $order->get_meta('_ae_ppcp_' . $action . '_operations', true);
+            $generation = is_array($progress) && isset($progress[$resource]) ? array_keys($progress[$resource]) : array();
+            sort($generation);
+        } elseif ('create_order' === $action && !$order_id && function_exists('WC') && WC()->cart) {
+            $generation = array(WC()->cart->get_cart_hash(), WC()->session->get('ae_ppcp_checkout_generation', ''));
+        }
+        return new AngellEYE_PayPal_PPCP_Operation(
+            array((bool) $this->is_sandbox, $this->merchant_id, $identity, $action, $resource),
+            $action,
+            $generation
+        );
+    }
+
     public function generate_request_id() {
-        static $pid = -1;
-        static $addr = -1;
-
-        if ($pid == -1) {
-            $pid = uniqid('angelleye-pfw', true);
-        }
-
-        if ($addr == -1) {
-            if (array_key_exists('SERVER_ADDR', $_SERVER)) {
-                $addr = ip2long($_SERVER['SERVER_ADDR']);
-            } else {
-                $addr = php_uname('n');
-            }
-        }
-
-        return $addr . $pid . $_SERVER['REQUEST_TIME'] . mt_rand(0, 0xffff);
+        return wp_generate_uuid4();
     }
 
     public function angelleye_ppcp_get_readable_message($error, $error_email_notification_param = array()) {
@@ -1205,9 +1220,11 @@ class AngellEYE_PayPal_PPCP_Payment {
 
 
 	public function angelleye_ppcp_order_capture_request($woo_order_id, $need_to_update_order = true) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($woo_order_id, 'capture_order', AngellEye_Session_Manager::get('paypal_order_id', ''));
             $order = wc_get_order($woo_order_id);
-            if ($need_to_update_order) {
+            if ($need_to_update_order && !$operation->has_been_submitted()) {
                 $bool = $this->angelleye_ppcp_update_order($order);
                 if($bool === false) {
                     return false;
@@ -1222,6 +1239,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'blocking' => true,
                 'headers' => array('Content-Type' => 'application/json', 'Authorization' => '', "prefer" => "return=representation", 'PayPal-Request-Id' => $this->generate_request_id(), 'Paypal-Auth-Assertion' => $this->angelleye_ppcp_paypalauthassertion()),
             );
+            $args['angelleye_payment_state'] = array($order->get_total(), $order->get_currency());
             $this->api_response = $this->api_request->request($this->paypal_order_api . $paypal_order_id . '/capture', $args, 'capture_order');
             $angelleye_ppcp_payment_method_title = $this->get_set_payment_method_title_from_session($woo_order_id);
             if (!empty($angelleye_ppcp_payment_method_title)) {
@@ -1425,6 +1443,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
@@ -1774,7 +1796,9 @@ class AngellEYE_PayPal_PPCP_Payment {
     }
 
     public function angelleye_ppcp_refund_order($order_id, $amount, $reason, $transaction_id) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($order_id, 'refund_order', $transaction_id);
             $order = wc_get_order($order_id);
             $decimals = $this->angelleye_ppcp_get_number_of_decimal_digits();
             $angelleye_ppcp_payment_method_title = $this->get_payment_method_title_for_order($order_id);
@@ -1826,19 +1850,26 @@ class AngellEYE_PayPal_PPCP_Payment {
                 }
                 return false;
             }
+            $operation->commit($order);
             return true;
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
             return new WP_Error('error', $ex->getMessage());
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
     public function angelleye_ppcp_order_auth_request($woo_order_id) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($woo_order_id, 'authorize_order', AngellEye_Session_Manager::get('paypal_order_id', ''));
             $this->paymentaction = apply_filters('angelleye_ppcp_paymentaction', $this->paymentaction, $woo_order_id);
             $order = wc_get_order($woo_order_id);
-            $bool = $this->angelleye_ppcp_update_order($order);
+            $bool = $operation->has_been_submitted() ? true : $this->angelleye_ppcp_update_order($order);
             if($bool === false) {
                 return false;
             }
@@ -1851,6 +1882,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'blocking' => true,
                 'headers' => array('Content-Type' => 'application/json', 'Authorization' => '', "prefer" => "return=representation", 'PayPal-Request-Id' => $this->generate_request_id(), 'Paypal-Auth-Assertion' => $this->angelleye_ppcp_paypalauthassertion()),
             );
+            $args['angelleye_payment_state'] = array($order->get_total(), $order->get_currency());
             $this->api_response = $this->api_request->request($this->paypal_order_api . $paypal_order_id . '/authorize', $args, 'authorize_order');
             $angelleye_ppcp_payment_method_title = $this->get_set_payment_method_title_from_session($woo_order_id);
             if (!empty($angelleye_ppcp_payment_method_title)) {
@@ -2024,6 +2056,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
@@ -2363,7 +2399,9 @@ class AngellEYE_PayPal_PPCP_Payment {
     }
 
     public function angelleye_ppcp_regular_create_order_request($woo_order_id = null, $return_url = true) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($woo_order_id, 'create_order', '');
             $return_response = [];
             if (angelleye_ppcp_get_order_total($woo_order_id) === 0) {
                 $wc_notice = __('Sorry, your session has expired.', 'paypal-for-woocommerce');
@@ -2377,7 +2415,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 $cart = $this->angelleye_ppcp_get_details_from_order($woo_order_id);
             }
             $decimals = $this->angelleye_ppcp_get_number_of_decimal_digits();
-            $reference_id = wc_generate_order_key();
+            $reference_id = $operation->reference();
             AngellEye_Session_Manager::set('reference_id', $reference_id);
             $intent = ($this->paymentaction === 'capture') ? 'CAPTURE' : 'AUTHORIZE';
             $body_request = array(
@@ -2566,6 +2604,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
@@ -2821,7 +2863,9 @@ class AngellEYE_PayPal_PPCP_Payment {
     }
 
     public function angelleye_ppcp_multi_account_refund_order_third_party($order_id, $value, $testmode) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($order_id, 'refund_order', $value['transaction_id'] ?? '');
             if(!isset($value['transaction_id'])) {
                 return;
             }
@@ -2870,11 +2914,16 @@ class AngellEYE_PayPal_PPCP_Payment {
                 }
                 return false;
             }
+            $operation->commit($order);
             return $this->api_response;
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
             return new WP_Error('error', $ex->getMessage());
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
@@ -2885,7 +2934,10 @@ class AngellEYE_PayPal_PPCP_Payment {
      * @return false|void
      */
     public function angelleye_ppcp_capture_authorized_payment_admin($order, $order_data) {
+        $operation = null;
+        $capture_accepted = false;
         try {
+            $operation = $this->begin_payment_operation($order ? $order->get_id() : 0, 'capture_authorized', $order ? $order->get_meta('_auth_transaction_id', true) : '');
             if ($order === false) {
                 return false;
             }
@@ -2925,6 +2977,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                 'cookies' => array()
             );
             $this->api_response = $this->api_request->request($this->auth . $authorization_id . '/capture', $args, 'capture_authorized');
+            $capture_accepted = !empty($this->api_response['id']) && in_array($this->api_response['status'] ?? '', array('COMPLETED', 'PENDING'), true);
             if (!empty($this->api_response['id'])) {
                 $payment_source = $this->api_response['payment_source'] ?? '';
                 if (!empty($payment_source['card'])) {
@@ -2982,6 +3035,7 @@ class AngellEYE_PayPal_PPCP_Payment {
                             $transaction_id = isset($this->api_response['transaction_id']) ? $this->api_response['transaction_id'] : $transaction_id;
                             $transaction_amount = isset($this->api_response['amount']['value']) ? $this->api_response['amount']['value'] : $item_amount;
                             $transaction_date = date('m/d/y H:i', strtotime($this->api_response['update_time']));
+                            $ppcp_capture_details = array();
                             $ppcp_capture_details[] = array(
                                 '_ppcp_transaction_id' => $transaction_id,
                                 '_ppcp_transaction_date' => $transaction_date,
@@ -2989,7 +3043,8 @@ class AngellEYE_PayPal_PPCP_Payment {
                             );
                             $_ppcp_capture_details = wc_get_order_item_meta($item_id, '_ppcp_capture_details', true);
                             if (!empty($_ppcp_capture_details)) {
-                                $ppcp_capture_details = array_merge($_ppcp_capture_details, $ppcp_capture_details);
+                                $ppcp_capture_details = in_array($transaction_id, array_column($_ppcp_capture_details, '_ppcp_transaction_id'), true)
+                                    ? $_ppcp_capture_details : array_merge($_ppcp_capture_details, $ppcp_capture_details);
                             }
                             wc_update_order_item_meta($item_id, '_ppcp_capture_details', $ppcp_capture_details);
                         }
@@ -3036,14 +3091,23 @@ class AngellEYE_PayPal_PPCP_Payment {
                     $order->add_order_note('Error Message : ' . $error_message);
                 }
             }
+            if ($capture_accepted) {
+                $operation->commit($order);
+            }
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
     public function angelleye_ppcp_refund_order_admin($order, $order_data) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($order ? $order->get_id() : 0, 'refund_order', $order_data['angelleye_ppcp_refund_data'] ?? '');
             if ($order === false) {
                 return false;
             }
@@ -3086,11 +3150,16 @@ class AngellEYE_PayPal_PPCP_Payment {
                 }
                 return false;
             }
+            $operation->commit($order);
             return true;
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
             return new WP_Error('error', $ex->getMessage());
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
@@ -3190,7 +3259,9 @@ class AngellEYE_PayPal_PPCP_Payment {
     }
 
     public function angelleye_ppcp_capture_order_using_payment_method_token($order_id) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($order_id, 'create_order', '');
             $order = wc_get_order($order_id);
             $angelleye_ppcp_payment_method_title = $this->get_payment_method_title_for_order($order_id);
             $this->paymentaction = apply_filters('angelleye_ppcp_paymentaction', $this->paymentaction, $order_id);
@@ -3538,6 +3609,10 @@ class AngellEYE_PayPal_PPCP_Payment {
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
@@ -4881,7 +4956,9 @@ class AngellEYE_PayPal_PPCP_Payment {
     }
 
     public function angelleye_ppcp_refund_capture_order($order_id, $amount, $note_to_payer, $transaction_id, $item_id) {
+        $operation = null;
         try {
+            $operation = $this->begin_payment_operation($order_id, 'refund_order', $transaction_id);
             $order = wc_get_order($order_id);
             if ($order === false) {
                 return false;
@@ -4925,7 +5002,8 @@ class AngellEYE_PayPal_PPCP_Payment {
                 );
                 $_ppcp_refund_details = wc_get_order_item_meta($item_id, '_ppcp_refund_details', true);
                 if (!empty($_ppcp_refund_details)) {
-                    $ppcp_refund_details = array_merge($_ppcp_refund_details, $ppcp_refund_details);
+                    $ppcp_refund_details = in_array($refund_transaction_id, array_column($_ppcp_refund_details, '_ppcp_refund_id'), true)
+                        ? $_ppcp_refund_details : array_merge($_ppcp_refund_details, $ppcp_refund_details);
                 }
                 wc_update_order_item_meta($item_id, '_ppcp_refund_details', $ppcp_refund_details);
                 $this->angelleye_ppcp_update_capture_details($transaction_id, $refund_transaction_id, $gross_amount, $item_id);
@@ -4940,11 +5018,16 @@ class AngellEYE_PayPal_PPCP_Payment {
                 }
                 return false;
             }
+            $operation->commit($order);
             return true;
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' . $ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
             return new WP_Error('error', $ex->getMessage());
+        } finally {
+            if ($operation) {
+                $operation->close();
+            }
         }
     }
 
@@ -5019,6 +5102,9 @@ class AngellEYE_PayPal_PPCP_Payment {
             }
             foreach ($ppcp_capture as $key => $ppcp_capture_details) {
                 if ($capture_id === $ppcp_capture_details['_ppcp_transaction_id']) {
+                    if (in_array($refund_id, array_column($ppcp_capture_details['refund'] ?? array(), 'refund_id'), true)) {
+                        continue;
+                    }
                     $ppcp_capture[$key]['refund'][] = array('refund_id' => $refund_id, 'refund_amount' => $refund_amount);
                     if (isset($ppcp_capture[$key]['total_refund_amount'])) {
                         $ppcp_capture[$key]['total_refund_amount'] = $ppcp_capture[$key]['total_refund_amount'] + $refund_amount;

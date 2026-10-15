@@ -190,6 +190,7 @@ class WFOCU_Paypal_For_WC_Gateway_AngellEYE_PPCP extends WFOCU_Gateway {
                 ),
             );
             $capture_url = $this->get_api_base($environment) . 'v2/checkout/orders/' . $paypal_order_id . '/capture';
+            $capture_args['angelleye_operation_scope'] = array('order_id' => $get_order->get_id(), 'resource' => $paypal_order_id);
             $resp_body = $this->api_request->request($capture_url, $capture_args, 'capture_order');
             $existing_package = WFOCU_Core()->data->get('upsell_package', '', 'paypal');
             WFOCU_Core()->data->set('_upsell_package', $existing_package);
@@ -274,6 +275,7 @@ class WFOCU_Paypal_For_WC_Gateway_AngellEYE_PPCP extends WFOCU_Gateway {
                         ), $get_order, $posted_data, $offer_package);
 
                 $url = $this->get_api_base($environment) . 'v2/checkout/orders';
+                $arguments['angelleye_operation_scope'] = array('order_id' => $get_order->get_id(), 'resource' => 'funnelkit-offer:' . $get_current_offer);
                 $response = $this->api_request->request($url, $arguments, 'create_order');
                 if (isset($response['status']) && 'failed' === $response['status']) {
                     $data = WFOCU_Core()->process_offer->_handle_upsell_charge(false);
@@ -465,6 +467,7 @@ class WFOCU_Paypal_For_WC_Gateway_AngellEYE_PPCP extends WFOCU_Gateway {
                             ), $get_order, $posted_data, $offer_package);
 
                     $url = $this->get_api_base($environment) . 'v2/checkout/orders';
+                    $arguments['angelleye_operation_scope'] = array('order_id' => $get_order->get_id(), 'resource' => 'funnelkit-offer:' . $get_current_offer);
                     $ppcp_resp = $this->api_request->request($url, $arguments, 'create_order');
                     WFOCU_Core()->log->log("Order: #" . $get_order->get_id() . " paypal response" . print_r($ppcp_resp, true));
                     if (!isset($ppcp_resp['id']) || empty($ppcp_resp['id'])) {
@@ -716,6 +719,7 @@ class WFOCU_Paypal_For_WC_Gateway_AngellEYE_PPCP extends WFOCU_Gateway {
                         ),
                         'body' => $data,
                     );
+                    $arguments['angelleye_operation_scope'] = array('order_id' => $order_id, 'resource' => $txn_id, 'generation' => array($event_id));
                     $resp = $this->api_request->request($api_url, $arguments, 'refund_order');
                     if (!isset($resp['status']) || !$resp['status'] == "COMPLETED") {
                         return false;

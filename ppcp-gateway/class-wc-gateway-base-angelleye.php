@@ -81,25 +81,44 @@ trait WC_Gateway_Base_AngellEYE
         $order = wc_get_order($order_id);
         if (apply_filters('angelleye_is_ppcp_parallel_payment_not_used', true, $order_id)) {
             if($order && $this->can_refund_order($order) && angelleye_ppcp_order_item_meta_key_exists($order, '_ppcp_capture_details')) {
-                $capture_data_list = $this->payment_request->angelleye_ppcp_prepare_refund_request_data_for_capture($order, $amount);
-                if(empty($capture_data_list)) {
-                    throw new Exception( __( 'No Capture transactions available for refund.', 'woocommerce' ) );
-                }
-                $failed_result_count = 0;
-                $successful_transaction = 0;
-                foreach ($capture_data_list as $item_id => $capture_data) {
-                    foreach ($capture_data as $transaction_id => $amount) {
-                        if ($this->payment_request->angelleye_ppcp_refund_capture_order($order_id, $amount, $reason, $transaction_id, $item_id)) {
-                            $successful_transaction++;
-                        } else {
-                            $failed_result_count++;
+                $batch = null;
+                try {
+                    $batch = new AngellEYE_PayPal_PPCP_Operation(
+                        array((bool) $this->payment_request->is_sandbox, $this->payment_request->merchant_id, 'order:' . $order_id, 'refund_batch', ''),
+                        'refund_batch'
+                    );
+                    $capture_data_list = $this->payment_request->angelleye_ppcp_prepare_refund_request_data_for_capture($order, $amount);
+                    if(empty($capture_data_list)) {
+                        throw new Exception( __( 'No Capture transactions available for refund.', 'woocommerce' ) );
+                    }
+                    $batch->start_batch();
+                    $failed_result_count = 0;
+                    $successful_transaction = 0;
+                    foreach ($capture_data_list as $item_id => $capture_data) {
+                        foreach ($capture_data as $transaction_id => $amount) {
+                            $result = $this->payment_request->angelleye_ppcp_refund_capture_order($order_id, $amount, $reason, $transaction_id, $item_id);
+                            if (is_wp_error($result)) {
+                                return $result;
+                            }
+                            if ($result) {
+                                $successful_transaction++;
+                            } else {
+                                $failed_result_count++;
+                            }
                         }
                     }
+                    if($failed_result_count > 0) {
+                        return false;
+                    }
+                    $batch->finish_batch();
+                    return true;
+                } catch (Exception $exception) {
+                    return new WP_Error('paypal_refund_reconciliation_required', $exception->getMessage());
+                } finally {
+                    if ($batch) {
+                        $batch->close();
+                    }
                 }
-                if($failed_result_count > 0) {
-                    return false;
-                }
-                return true;
             } else {
                 if (!$this->can_refund_order($order)) {
                     return new WP_Error('error', __('Refund failed.', 'paypal-for-woocommerce'));

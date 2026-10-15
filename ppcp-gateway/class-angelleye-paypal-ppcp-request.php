@@ -1,6 +1,7 @@
 <?php
 
 defined('ABSPATH') || exit;
+require_once __DIR__ . '/class-angelleye-paypal-ppcp-operation.php';
 
 class AngellEYE_PayPal_PPCP_Request {
 
@@ -300,8 +301,28 @@ class AngellEYE_PayPal_PPCP_Request {
 		    }
 	    }
 
+        $owned_operation = null;
         try {
             $this->angelleye_get_settings();
+            $operation = AngellEYE_PayPal_PPCP_Operation::current($action_name);
+            if (!$operation && isset($args['angelleye_operation_scope']) &&
+                in_array($action_name, array('create_order', 'capture_order', 'refund_order'), true)) {
+                $scope = $args['angelleye_operation_scope'];
+                $owned_operation = new AngellEYE_PayPal_PPCP_Operation(
+                    array((bool) $this->is_sandbox, $this->merchant_id, 'order:' . $scope['order_id'], $action_name, $scope['resource']),
+                    $action_name,
+                    $scope['generation'] ?? array()
+                );
+                $operation = $owned_operation;
+            }
+            unset($args['angelleye_operation_scope']);
+            $reconcile_url = $operation ? $operation->prepare($url, $args) : null;
+            unset($args['angelleye_payment_state']);
+            if ($reconcile_url) {
+                $url = $reconcile_url;
+                $args['method'] = 'GET';
+                unset($args['body']);
+            }
             $is_paypal_api = 'https' === wp_parse_url($url, PHP_URL_SCHEME) && in_array(wp_parse_url($url, PHP_URL_HOST),
                 array('api-m.paypal.com', 'api-m.sandbox.paypal.com', 'api.paypal.com', 'api.sandbox.paypal.com'), true);
             if (!$is_paypal_api) {
@@ -321,10 +342,18 @@ class AngellEYE_PayPal_PPCP_Request {
                 $this->result = $this->angelleye_ppcp_remote_get($url, $args, $action_name);
             }
 
-            return $this->api_response->parse_response($this->result, $url, $args, $action_name);
+            $response = $this->api_response->parse_response($this->result, $url, $args, $action_name);
+            if ($operation) {
+                $operation->record_response($response, is_wp_error($this->result) ? 0 : (int) wp_remote_retrieve_response_code($this->result));
+            }
+            return $response;
         } catch (Exception $ex) {
             $this->api_log->log("The exception was created on line: " . $ex->getFile() . ' ' .$ex->getLine(), 'error');
             $this->api_log->log($ex->getMessage(), 'error');
+        } finally {
+            if ($owned_operation) {
+                $owned_operation->close();
+            }
         }
     }
 

@@ -60,11 +60,40 @@ regression checks live under ``tests/``; run the add-on authorization check with
 network requests. Run ``php tests/security/direct-oauth.php`` to check direct
 merchant authentication, token caching, refresh limits, and partner routing with
 stubbed HTTP and transient storage.
+Run ``php tests/security/payment-idempotency.php`` to check durable operation
+identity, order locks, partial payments, and refund bookkeeping with stubbed
+WordPress storage.
+
+Payment operation records
+-------------------------
+
+Core create, authorize, capture, and refund paths persist operation UUIDs before
+submission. FunnelKit and CartFlows adapters also provide order/offer identity
+to the shared transport. An uncertain retry preserves its request UUID and
+payment details. A known PayPal result is recovered with a read-only API call.
+Distinct partial captures and refunds advance only after local bookkeeping;
+recovered refund IDs do not increase local refunded totals twice.
+
+Records use non-autoloaded ``ae_ppcp_operation_*`` WordPress options and order
+metadata named ``_ae_ppcp_*_operations``. Records contain identifiers and request
+fingerprints rather than full payment bodies. Do not delete these records as
+routine cache cleanup: they protect retries after an interrupted payment.
+
+Order locks use ``ae_ppcp_lock_*`` options and are released on normal completion
+or PHP shutdown. A worker killed without shutdown can leave a lock behind. Locks
+are deliberately not stolen automatically. Confirm that no worker is still
+processing the order and reconcile its PayPal state before manually clearing an
+orphaned lock. An unknown outcome beyond the conservative six-hour retry window,
+or an interrupted multi-capture refund batch, also requires reconciliation before
+another operation. There is no automatic administrative recovery UI yet.
 
 Before deploying payment changes, verify the affected success and failure paths,
 including permissions/nonces for administrative actions, and capture failures,
 timeouts, retries, and duplicate requests for payment operations. Record which
 checks ran and which still require a configured store.
+In particular, the standalone checks do not exercise real database contention,
+HPOS persistence, PayPal sandbox behaviour, or installed upsell plugins. Validate
+these integrations in staging before deploying the operation changes.
 
 Maintaining and deploying this fork
 -----------------------------------

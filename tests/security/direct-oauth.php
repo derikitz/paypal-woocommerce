@@ -15,7 +15,17 @@ function wp_parse_url($url, $component) { return parse_url($url, $component); }
 function wp_remote_retrieve_response_code($response) { return $response['response']['code'] ?? ''; }
 function wp_remote_retrieve_body($response) { return $response['body'] ?? ''; }
 function get_home_url() { return 'https://store.example'; }
-function get_option($name, $default = false) { return $default; }
+function get_option($name, $default = false) { global $operation_options; return $operation_options[$name] ?? $default; }
+function add_option($key, $value, $deprecated = '', $autoload = false) {
+    global $operation_options;
+    if (isset($operation_options[$key])) { return false; }
+    $operation_options[$key] = $value;
+    return true;
+}
+function update_option($key, $value, $autoload = false) { global $operation_options; $operation_options[$key] = $value; return true; }
+function delete_option($key) { global $operation_options; unset($operation_options[$key]); }
+function wp_generate_uuid4() { static $id = 0; return sprintf('00000000-0000-4000-8000-%012d', ++$id); }
+function wc_generate_order_key() { return 'wc_order_' . wp_generate_uuid4(); }
 
 $cache = $cache_ttls = $calls = $responses = array();
 $checks = 0;
@@ -194,4 +204,56 @@ expect_check($calls[1]['args']['headers']['Authorization'] === 'Bearer probe', '
 reset_http(array(response(401, array())));
 expect_check(!angelleye_ppcp_account_ready_to_paid(true, 'client', 'secret', 'seller@example.test') && count($calls) === 1, 'Readiness probe stops on OAuth failure');
 
-echo 'Passed ' . $checks . " direct OAuth checks.\n";
+// Exercise durable identity through the real request/authentication transport.
+$capture_url = $url . '/ORDER/capture';
+$scope = array(true, 'merchant', 'order:transport', 'capture_order', 'ORDER');
+$op = new AngellEYE_PayPal_PPCP_Operation($scope, 'capture_order');
+reset_http(array(token_response(), new WP_Error('timeout', 'Capture response lost')));
+$request->request($capture_url, $args, 'capture_order');
+$sent_id = $calls[1]['args']['headers']['PayPal-Request-Id'];
+$op->close();
+$op = new AngellEYE_PayPal_PPCP_Operation($scope, 'capture_order');
+reset_http(array(response(201, array('id' => 'ORDER', 'status' => 'COMPLETED'))), false);
+$request->request($capture_url, $args, 'capture_order');
+expect_check(count($calls) === 1 && $calls[0]['args']['headers']['PayPal-Request-Id'] === $sent_id, 'Payment retry after timeout reuses durable UUID through OAuth transport');
+$op->close();
+$op = new AngellEYE_PayPal_PPCP_Operation($scope, 'capture_order');
+reset_http(array(response(200, array('id' => 'ORDER', 'status' => 'COMPLETED'))), false);
+$request->request($capture_url, $args, 'capture_order');
+expect_check($calls[0]['url'] === $url . '/ORDER' && $calls[0]['args']['method'] === 'GET' && !isset($calls[0]['args']['body']), 'Accepted capture is reconciled with GET rather than replayed');
+$op->close();
+
+$request->is_first_party_used = 'no';
+$scope[2] = 'order:proxy';
+$op = new AngellEYE_PayPal_PPCP_Operation($scope, 'capture_order');
+reset_http(array(new WP_Error('timeout', 'Proxy timeout'), new WP_Error('timeout', 'Proxy timeout')));
+$request->request($capture_url, $args, 'capture_order');
+$proxy_first = json_decode($calls[0]['args']['body'], true);
+$op->close();
+$op = new AngellEYE_PayPal_PPCP_Operation($scope, 'capture_order');
+reset_http(array(response(201, array('id' => 'ORDER', 'status' => 'COMPLETED'))));
+$request->request($capture_url, $args, 'capture_order');
+$proxy_retry = json_decode($calls[0]['args']['body'], true);
+expect_check($proxy_first['paypal_header']['PayPal-Request-Id'] === $proxy_retry['paypal_header']['PayPal-Request-Id'], 'Proxy retries reuse durable UUID across invocations');
+$op->close();
+
+// Upsell adapters supply order/offer identity without keeping an outer context.
+$request->is_first_party_used = 'yes';
+$offer_args = $args;
+$offer_args['angelleye_operation_scope'] = array('order_id' => 77, 'resource' => 'offer:1');
+reset_http(array(token_response(), new WP_Error('timeout', 'Offer response lost')));
+$request->request($url, $offer_args, 'create_order');
+$offer_id = $calls[1]['args']['headers']['PayPal-Request-Id'];
+expect_check(!isset($calls[1]['args']['angelleye_operation_scope']) && !AngellEYE_PayPal_PPCP_Operation::current('create_order'), 'Adapter context stays local and releases its lock');
+reset_http(array(response(201, array('id' => 'OFFER-ORDER', 'status' => 'CREATED'))), false);
+$request->request($url, $offer_args, 'create_order');
+expect_check($calls[0]['args']['headers']['PayPal-Request-Id'] === $offer_id, 'Upsell retry retains request identity');
+reset_http(array(response(200, array('id' => 'OFFER-ORDER', 'status' => 'CREATED'))), false);
+$request->request($url, $offer_args, 'create_order');
+expect_check($calls[0]['args']['method'] === 'GET' && $calls[0]['url'] === $url . '/OFFER-ORDER', 'Accepted upsell order is read instead of recreated');
+$offer_args['angelleye_operation_scope']['resource'] = 'offer:2';
+reset_http(array(response(201, array('id' => 'SECOND-OFFER', 'status' => 'CREATED'))), false);
+$request->request($url, $offer_args, 'create_order');
+expect_check($calls[0]['args']['headers']['PayPal-Request-Id'] !== $offer_id, 'Separate equal-amount offers get distinct request identities');
+
+echo 'Passed ' . $checks . " direct OAuth and transport checks.\n";

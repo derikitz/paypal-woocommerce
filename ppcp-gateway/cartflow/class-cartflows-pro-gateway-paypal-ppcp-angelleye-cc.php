@@ -165,6 +165,7 @@ class Cartflows_Pro_Gateway_PayPal_PPCP_CC_AngellEYE extends Cartflows_Pro_Paypa
                 'body' => $data,
             );
             $url = 'https://api-m.' . $args['ppcp_data']['environment'] . 'paypal.com/v2/checkout/orders';
+            $arguments['angelleye_operation_scope'] = array('order_id' => $order_id, 'resource' => 'cartflows-step:' . $args['step_id']);
             $response = $this->api_request->request($url, $arguments, 'create_order');
             if (ob_get_length()) {
                 ob_end_clean();
@@ -224,6 +225,7 @@ class Cartflows_Pro_Gateway_PayPal_PPCP_CC_AngellEYE extends Cartflows_Pro_Paypa
             ),
         );
         $capture_url = 'https://api-m.' . $environment . 'paypal.com/v2/checkout/orders/' . $paypal_order_id . '/capture';
+        $capture_args['angelleye_operation_scope'] = array('order_id' => $order_id, 'resource' => $paypal_order_id);
         $resp_body = $this->api_request->request($capture_url, $capture_args, 'capture_order');
         if (is_wp_error($resp_body)) {
             $json_response = array(
