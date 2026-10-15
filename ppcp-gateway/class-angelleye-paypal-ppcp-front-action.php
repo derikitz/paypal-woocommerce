@@ -53,6 +53,8 @@ class AngellEYE_PayPal_PPCP_Front_Action {
         add_action("woocommerce_checkout_create_order", array($this, "angelleye_convert_order_prices_to_active_currency"), 9999, 2);
 
         add_action('set_logged_in_cookie', [$this, 'handle_logged_in_cookie_nonce_on_checkout'], 1000, 6);
+        add_action('admin_post_angelleye_ppcp_install_shipment_plugin', array($this, 'install_shipment_tracking_plugin'));
+        add_action('admin_post_angelleye_ppcp_install_pfwma_plugin', array($this, 'install_pfwma_plugin'));
     }
 
     public function angelleye_ppcp_load_class() {
@@ -455,12 +457,6 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                 case "angelleye_ppcp_cc_setup_tokens":
                     $this->payment_request->angelleye_ppcp_advanced_credit_card_setup_tokens();
                     exit();
-                case "install_shipment_plugin":
-                    $this->install_shipment_tracking_plugin();
-                    exit();
-                case "install_pfwma_plugin":
-                    $this->install_pfwma_plugin();
-                    exit();
             }
         }
     }
@@ -838,7 +834,20 @@ class AngellEYE_PayPal_PPCP_Front_Action {
         return rmdir($dir);
     }
 
+    private function authorize_addon_installation($nonce_action) {
+        if (!current_user_can('install_plugins') || !current_user_can('activate_plugins')) {
+            wp_die(
+                esc_html__('You are not allowed to install or activate plugins.', 'paypal-for-woocommerce'),
+                '',
+                array('response' => 403)
+            );
+        }
+
+        check_admin_referer($nonce_action);
+    }
+
     public function install_shipment_tracking_plugin() {
+        $this->authorize_addon_installation('angelleye_ppcp_install_shipment_plugin');
         try {
             $github_repo_url = 'https://updates.angelleye.com/ae-updater/angelleye-paypal-shipment-tracking-woocommerce/angelleye-paypal-shipment-tracking-woocommerce.zip';
             $plugin_folder_name = 'angelleye-paypal-shipment-tracking-woocommerce';
@@ -890,6 +899,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
     }
 
     public function install_pfwma_plugin() {
+        $this->authorize_addon_installation('angelleye_ppcp_install_pfwma_plugin');
         try {
             $github_repo_url = 'https://updates.angelleye.com/ae-updater/paypal-for-woocommerce-multi-account-management/paypal-for-woocommerce-multi-account-management.zip';
             $plugin_folder_name = 'paypal-for-woocommerce-multi-account-management';
