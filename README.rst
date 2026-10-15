@@ -1,70 +1,93 @@
-###################
-Update About WordPress Directory
-###################
+PayPal for WooCommerce - independent fork
+=======================================
 
-Can't find us on WordPress?  Don't worry, we're still here!
+This repository is an independently maintained fork of
+`Angell EYE's PayPal for WooCommerce <https://github.com/angelleye/paypal-woocommerce>`_,
+starting from plugin version 4.6.3. It extends WooCommerce with PayPal gateways,
+including PayPal Complete Payments, card fields, Apple Pay, Google Pay, vaulted
+payment methods, and legacy gateway integrations.
 
-All of our plugins are now hosted on our own servers, giving us more freedom and flexibility to bring you the features you are asking for.
+Changes here are maintained for this fork. Our workflow does not include sending
+pull requests to the upstream plugin. Upstream branding and attribution in the
+inherited source do not imply endorsement or support for this fork.
 
-Please install the `Angell EYE Updater <https://www.angelleye.com/product/angelleye-updater-wordpress/>`_ in order to receive notices and automated updates going forward.
+Purpose and current work
+------------------------
 
-If you have any questions or concerns, please `create a ticket <https://www.angelleye.com/support>`_ and we'll be happy to get you taken care of.
+The immediate focus is reviewing the inherited integration against current PayPal
+documentation and improving security, payment reliability, and maintainability.
+The audit is a source review; it does not certify production readiness.
 
-###################
-Introduction
-###################
+Work proceeds in separate, reviewable stages:
 
-This is a PayPal extension for the WooCommerce shopping cart system on WordPress.
+1. Secure add-on installation and activation actions.
+2. Remove the TLS certificate-verification bypass.
+3. Correct direct merchant OAuth authentication.
+4. Persist idempotency keys and protect concurrent payment operations.
+5. Correct Google Pay success/failure propagation and capture completion.
+6. Normalize transport error responses.
+7. Redact sensitive payment logs.
 
-**********************
-Minimum Requirements
-**********************
+After each stage, run focused checks, review the diff, provide a commit message,
+and pause for review and a separate commit before beginning the next stage.
+Webhook reconciliation, order authorization, decline recovery, PHP compatibility,
+and staged JavaScript SDK v6 migration are additional audit follow-ups.
 
--  PHP version 5.6+.
--  WordPress 3.8+
--  WooCommerce 3.0+
+The detailed local reference is ``PAYPAL-AUDIT.md``. It is intentionally ignored
+by Git and will not be present in a fresh clone. Keep shared project guidance in
+this README and record implemented changes in commit history.
 
-************
-Installation
-************
+Development and validation
+--------------------------
 
- 1. Download the plugin from GitHub or `through our website <https://www.angelleye.com/product/woocommerce-paypal-plugin/>`_.
- 2. Unzip the files and upload the folder into your plugins folder (wp-content/plugins/) overwriting old versions if they exist.
- 3. Activate the plugin in your WordPress admin panel.
- 4. Open the settings page for WooCommerce and click the "Payments" tab
- 5. Click to manage the Payment Gateway you would like to setup.
- 6. Configure your settings accordingly, and Save!
+Use a local or staging WordPress installation with WooCommerce and PayPal sandbox
+credentials. Place this checkout in ``wp-content/plugins/``, activate the plugin,
+and configure the gateway under WooCommerce -> Settings -> Payments.
 
-*********
-Setup
-*********
+The inherited metadata lists WordPress 5.8+ and WooCommerce 3.0+, with testing
+claims up to WordPress 6.8.2 and WooCommerce 10.1.2. Those are upstream declarations,
+not a compatibility matrix verified for this fork. The inherited Composer PHP
+requirement is also outdated: current source includes typed properties and
+``str_contains()``. Use PHP 8+ for development; the supported version matrix still
+needs explicit validation and alignment across metadata.
 
-Login to your WordPress control panel and go to WooCommerce -> Settings.  Then click into the Checkout tab.
+Install development tools with ``composer install``. Available scripts are
+``composer lint``, ``composer lint:errors``, and ``composer lint:fix``. Syntax
+checks do not replace WordPress integration and sandbox tests. Focused standalone
+regression checks live under ``tests/``; run the add-on authorization check with
+``php tests/security/addon-installation.php``.
 
-You'll see the following Checkout Options have been added.
+Before deploying payment changes, verify the affected success and failure paths,
+including permissions/nonces for administrative actions, and capture failures,
+timeouts, retries, and duplicate requests for payment operations. Record which
+checks ran and which still require a configured store.
 
-- PayPal Website Payments Pro (DoDirectPayment)
-- PayPal Payments Pro 2.0 (PayFlow) 
-- PayPal Express Checkout
-- PayPal Plus (Germany)
-- PayPal Payments Advanced
-- PayPal REST Credit Card Payments
-- PayPal Braintree Credit Card Payments
+Maintaining and deploying this fork
+-----------------------------------
 
-For each one that you would like to activate, simply click into that section, enter your API credentials, and setup the options however you like.
+Deploy reviewed builds from this repository through your own release process.
+An upstream update may overwrite fork changes; review and test upstream changes
+before incorporating them. This README does not change the plugin's updater
+behaviour, identifiers, or external service dependencies.
 
-*********
-Updates
-*********
+Some inherited integrations use Angell EYE-hosted services and add-ons. Changes
+to this repository alone do not establish control over those services. Review
+their behaviour and availability when validating the fork.
 
-To receive notices and automated updates for the plugin, make sure to install our `Updater plugin <https://www.angelleye.com/how-to-get-updates-angelleye-wordpress-plugins/>`_.
+References
+-----------
 
-This will allow you to maintain the plugin with automated updates the same way you do any other plugin in WordPress.
+* `PayPal REST authentication <https://developer.paypal.com/api/rest/authentication/>`_
+* `PayPal idempotency <https://developer.paypal.com/api/rest/reference/idempotency/>`_
+* `PayPal webhooks <https://developer.paypal.com/api/rest/webhooks/rest/>`_
+* `JavaScript SDK v5 to v6 migration <https://developer.paypal.com/v5-v6>`_
+* `PayPal PHP Server SDK <https://github.com/paypal/PayPal-PHP-Server-SDK>`_
 
-*********
-Resources
-*********
+License and attribution
+------------------------
 
--  `How to Update Angell EYE Plugins <https://www.angelleye.com/how-to-get-updates-angelleye-wordpress-plugins/>`_
--  `Obtain Sandbox API Credentials <https://www.sandbox.paypal.com/us/cgi-bin/webscr?cmd=_login-api-run>`_
--  `Obtain Live API Credentials <https://www.paypal.com/us/cgi-bin/webscr?cmd=_login-api-run>`_
+This fork retains the original Angell EYE attribution and the WooThemes/SkyVerge
+derivative-work attribution in the plugin source. The inherited plugin is
+licensed under the GNU General Public License v3.0; see ``LICENSE.txt`` and the
+individual notices in bundled libraries. ``readme.txt`` retains upstream plugin
+description and changelog material; this README describes the fork's workflow.
