@@ -269,4 +269,24 @@ reset_http(array(token_response(), response(200, array('id' => 'ATTRIBUTION'))))
 $request->request($url . '/ATTRIBUTION', array('method' => 'GET', 'headers' => array('PayPal-Partner-Attribution-Id' => 'CUSTOM_BN')), 'get_order');
 expect_check($calls[1]['args']['headers']['PayPal-Partner-Attribution-Id'] === 'CUSTOM_BN', 'Caller attribution preserved');
 
+// Reject malformed partner bodies before storing a submitted fingerprint. A
+// corrected partial refund must remain usable with the same adapter scope.
+$request->is_first_party_used = 'no';
+$refund_url = 'https://api-m.sandbox.paypal.com/v2/payments/captures/BODY-TEST/refund';
+$refund_args = array('method' => 'POST', 'headers' => array('PayPal-Request-Id' => 'body-test'),
+    'body' => '{bad', 'angelleye_operation_scope' => array('order_id' => 99, 'resource' => 'BODY-TEST'));
+$before_options = $operation_options;
+reset_http(array());
+$result = $request->request($refund_url, $refund_args, 'refund_order');
+expect_check(is_wp_error($result) && !$calls, 'Public partner path rejects invalid JSON without HTTP');
+expect_check($operation_options === $before_options, 'Local body error creates no operation or submitted fingerprint');
+expect_check(!AngellEYE_PayPal_PPCP_Operation::current('refund_order'), 'Rejected body leaves no active refund lock');
+$refund_args['body'] = '{"amount":{"value":"10.00","currency_code":"USD"},"note_to_payer":"Partial refund"}';
+reset_http(array(response(201, array('body' => array('id' => 'BODY-REFUND', 'status' => 'COMPLETED')))));
+$request->request($refund_url, $refund_args, 'refund_order');
+$sent = json_decode($calls[0]['args']['body'], true);
+expect_check($sent['paypal_body']['amount'] === array('value' => '10.00', 'currency_code' => 'USD'), 'Corrected scoped partial refund preserves amount/currency');
+expect_check($sent['paypal_body']['note_to_payer'] === 'Partial refund', 'Corrected scoped partial refund preserves reason');
+expect_check(!AngellEYE_PayPal_PPCP_Operation::current('refund_order'), 'Corrected refund releases its lock');
+
 echo 'Passed ' . $checks . " direct OAuth and transport checks.\n";

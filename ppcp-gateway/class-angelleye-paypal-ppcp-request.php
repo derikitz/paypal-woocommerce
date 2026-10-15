@@ -129,7 +129,28 @@ class AngellEYE_PayPal_PPCP_Request {
         }
     }
 
+    /** Decode one JSON layer; never turn an invalid payment body into an empty one. */
+    private static function proxy_body($value) {
+        $error = new WP_Error('paypal_invalid_request_body', 'Invalid PayPal request body. No request was sent.');
+        if ($value === null || $value === '') {
+            return null; // Preserve intentional no-body operations.
+        }
+        if (is_string($value)) {
+            $value = json_decode($value);
+            if (json_last_error() !== JSON_ERROR_NONE || (!is_array($value) && !($value instanceof stdClass))) {
+                return $error;
+            }
+        } elseif (!is_array($value)) {
+            return $error;
+        }
+        return wp_json_encode($value) === false ? $error : $value;
+    }
+
     public function angelleye_ppcp_remote_get($paypal_url, $args, $action_name, $retry = 1) {
+        $paypal_body = self::proxy_body($args['body'] ?? null);
+        if (is_wp_error($paypal_body)) {
+            return $paypal_body;
+        }
         $body['testmode'] = ($this->is_sandbox) ? 'yes' : 'no';
         $body['meta'] = [
             'plugin_version' => VERSION_PFW,
@@ -138,14 +159,13 @@ class AngellEYE_PayPal_PPCP_Request {
         $body['paypal_url'] = $paypal_url;
         $body['paypal_header'] = $args['headers'] ?? [];
         $body['paypal_method'] = isset($args['method']) ? $args['method'] : 'GET';
-        if (isset($args['body']) && is_array($args['body'])) {
-            $body['paypal_body'] = $args['body'];
-        } else {
-            $body['paypal_body'] = null;
-        }
+        $body['paypal_body'] = $paypal_body;
         $body['action_name'] = $action_name;
         $args['method'] = 'POST';
         $args['body'] = wp_json_encode($body);
+        if ($args['body'] === false) {
+            return new WP_Error('paypal_invalid_request_body', 'Invalid PayPal proxy request. No request was sent.');
+        }
         $args['timeout'] = 70;
         $args['user-agent'] = 'PFW_PPCP';
         $args['headers'] = array('Content-Type' => 'application/json');
@@ -298,6 +318,16 @@ class AngellEYE_PayPal_PPCP_Request {
         $owned_operation = null;
         try {
             $this->angelleye_get_settings();
+            $is_paypal_api = 'https' === wp_parse_url($url, PHP_URL_SCHEME) && in_array(wp_parse_url($url, PHP_URL_HOST),
+                array('api-m.paypal.com', 'api-m.sandbox.paypal.com', 'api.paypal.com', 'api.sandbox.paypal.com'), true);
+            if ($is_paypal_api && $this->is_first_party_used !== 'yes') {
+                $validated_body = self::proxy_body($args['body'] ?? null);
+                if (is_wp_error($validated_body)) {
+                    // Validate before preparing an operation: no submission or
+                    // fingerprint should be recorded for a local body error.
+                    return $this->api_response->parse_response($validated_body, $url, $args, $action_name);
+                }
+            }
             $operation = AngellEYE_PayPal_PPCP_Operation::current($action_name);
             if (!$operation && isset($args['angelleye_operation_scope']) &&
                 in_array($action_name, array('create_order', 'capture_order', 'refund_order'), true)) {
@@ -317,8 +347,6 @@ class AngellEYE_PayPal_PPCP_Request {
                 $args['method'] = 'GET';
                 unset($args['body']);
             }
-            $is_paypal_api = 'https' === wp_parse_url($url, PHP_URL_SCHEME) && in_array(wp_parse_url($url, PHP_URL_HOST),
-                array('api-m.paypal.com', 'api-m.sandbox.paypal.com', 'api.paypal.com', 'api.sandbox.paypal.com'), true);
             if (!$is_paypal_api) {
                 $args['timeout'] = '60';
                 $args['user-agent'] = 'PFW_PPCP';

@@ -33,6 +33,7 @@ Work proceeds in separate, reviewable stages:
 6. Normalize transport error responses.
 7. Redact sensitive payment logs.
 8. Authorize existing-order pay-page creation and totals requests.
+9. Preserve proxy request bodies, including partial-refund payloads.
 
 After each stage, run focused checks, review the diff, provide a commit message,
 and pause for review and a separate commit before beginning the next stage.
@@ -62,8 +63,8 @@ Install development tools with ``composer install``. Available scripts are
 checks do not replace WordPress integration and sandbox tests. Focused standalone
 regression checks live under ``tests/``; run the add-on authorization check with
 ``php tests/security/addon-installation.php``. Run the proxy TLS check with
-``php tests/security/proxy-tls.php``; its HTTP layer is stubbed and makes no
-network requests. Run ``php tests/security/direct-oauth.php`` to check direct
+``php tests/security/proxy-tls.php``; this checks TLS, proxy body preservation,
+empty-body operations and rejection of invalid payloads without network requests. Run ``php tests/security/direct-oauth.php`` to check direct
 merchant authentication, token caching, refresh limits, and partner routing with
 stubbed HTTP and transient storage.
 Run ``php tests/security/payment-idempotency.php`` to check durable operation
@@ -76,6 +77,24 @@ check that only an explicit successful capture result empties the cart and
 returns a successful checkout response.
 Run ``php tests/security/response-normalization.php`` to check transport/API
 errors, proxy envelopes, debug headers, and successful no-content responses.
+
+Proxy request bodies
+--------------------
+
+The partner proxy transport accepts PHP arrays or JSON strings whose root is an
+object or array. It preserves JSON container types and nested data, including
+refund amount/currency, platform fees and payer notes. An absent body, PHP null or
+an empty string retains the existing no-body contract. Serialized JSON scalars,
+malformed JSON, unsupported PHP body types and unencodable payloads fail locally
+without an HTTP request. Validation happens before preparing a submitted operation,
+so correcting a rejected body does not conflict with a stored request fingerprint.
+
+Prepared proxy envelopes and PayPal request IDs remain identical across retries.
+Run ``php tests/security/proxy-tls.php`` for payload/TLS checks and
+``php tests/security/direct-oauth.php`` for routing and operation integration.
+The separately callable ``multi_account_request()`` helper is unchanged. Confirm
+the external middleware and installed multi-account extension preserve the
+partial-refund amount and result in PayPal sandbox before deployment.
 
 API response errors
 -------------------
