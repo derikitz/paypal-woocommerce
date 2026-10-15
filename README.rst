@@ -55,7 +55,9 @@ Install development tools with ``composer install``. Available scripts are
 ``composer lint``, ``composer lint:errors``, and ``composer lint:fix``. Syntax
 checks do not replace WordPress integration and sandbox tests. Focused standalone
 regression checks live under ``tests/``; run the add-on authorization check with
-``php tests/security/addon-installation.php``.
+``php tests/security/addon-installation.php``. Run the proxy TLS check with
+``php tests/security/proxy-tls.php``; its HTTP layer is stubbed and makes no
+network requests.
 
 Before deploying payment changes, verify the affected success and failure paths,
 including permissions/nonces for administrative actions, and capture failures,

@@ -48,7 +48,6 @@ class AngellEYE_PayPal_PPCP_Request {
     public $api_password;
     public $api_signature;
     public $Force_tls_one_point_two;
-    private bool $ignore_ssl_in_request = false;
 
     public static function instance() {
         if (is_null(self::$_instance)) {
@@ -129,28 +128,6 @@ class AngellEYE_PayPal_PPCP_Request {
         }
     }
 
-    function is_ssl_error($message) {
-        if (is_object($message) && is_a($message, 'WP_Error')) {
-            $message = $message->get_error_message();
-        }
-        if (!is_string($message)) {
-            return false;
-        }
-        $ssl_errors = [
-            'ssl', 'SSL', 'SSL routines', 'sslv3', 'tlsv1', 'tls', 'cURL error 60',
-            'certificate', 'handshake failure', 'unable to get local issuer certificate',
-            'Peer’s Certificate', 'secure connection', 'unable to verify',
-            'SSL23_GET_SERVER_HELLO', 'EPROTO', 'curl: (35)'
-        ];
-
-        foreach ($ssl_errors as $pattern) {
-            if (stripos($message, $pattern) !== false) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     public function angelleye_ppcp_remote_get($paypal_url, $args, $action_name, $retry = 1) {
         $body['testmode'] = ($this->is_sandbox) ? 'yes' : 'no';
         $body['meta'] = [
@@ -177,21 +154,14 @@ class AngellEYE_PayPal_PPCP_Request {
             }
         }
         $args['headers']['plugin_version_id'] = VERSION_PFW;
-        if ($this->ignore_ssl_in_request === true) {
-            $args['sslverify'] = false;
-        }
-        if ('generate_id_token' === $action_name) {
-            $this->result = wp_remote_get($this->ppcp_host . 'generate-id-token', $args);
-        } else {
-            $this->result = wp_remote_get($this->ppcp_host . 'ppcp-request', $args);
-        }
-        // Handle SSL handshake errors:
-        // write EPROTO 140377683838912:error:14094410:SSL routines:ssl3_read_bytes:sslv3 alert handshake failure:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:1564:SSL alert number 40
+        // Certificate verification must remain enabled, including on retries.
+        $args['sslverify'] = true;
+        $request_url = $this->ppcp_host . ('generate_id_token' === $action_name ? 'generate-id-token' : 'ppcp-request');
+        $this->result = wp_remote_get($request_url, $args);
         if (is_wp_error($this->result) && $retry < 2) {
-            if ($this->is_ssl_error($this->result)) {
-                $this->ignore_ssl_in_request = true;
-            }
-            return $this->angelleye_ppcp_remote_get($paypal_url, $args, $action_name, ++$retry);
+            // Reuse the prepared request so the retry preserves the payload and
+            // PayPal idempotency headers instead of wrapping the proxy body again.
+            $this->result = wp_remote_get($request_url, $args);
         }
         return $this->result;
     }
