@@ -1,6 +1,5 @@
 const angelleyeOrder = {
     productAddToCart: true,
-    lastApiResponse: null,
     ppcp_address: [],
     isCheckoutPage: () => {
         return 'checkout' === angelleye_ppcp_manager.page;
@@ -130,7 +129,6 @@ const angelleyeOrder = {
         if (typeof apiUrl == 'undefined') {
             apiUrl = angelleye_ppcp_manager.create_order_url;
         }
-        angelleyeOrder.lastApiResponse = null;
         let formSelector = angelleyeOrder.getWooFormSelector();
         angelleyeOrder.removeError();
         let formData;
@@ -208,17 +206,10 @@ const angelleyeOrder = {
                 status: res.status,
                 time: new Date()
             });
-            console.log('createOrder response', {
-                res,
-                apiUrl,
-                redirected: res.redirected,
-                url: res.url,
-                status: res.status
-            });
+
             if (res.redirected) {
                 window.location.href = res.url;
             } else {
-                angelleyeOrder.lastApiResponse = await res.clone().text();
                 return res.json();
             }
         }).then(function (data) {
@@ -320,7 +311,7 @@ const angelleyeOrder = {
 
     },
     handleCreateOrderError: (error, errorLogId) => {
-        console.log('create_order_error', error, angelleyeOrder.lastApiResponse);
+
         angelleyeOrder.hideProcessingSpinner();
         jQuery(document.body).trigger('angelleye_paypal_onerror');
         let errorMessage = error.message ? error.message : error;
@@ -329,8 +320,7 @@ const angelleyeOrder = {
                 errorMessage = localizedMessages.create_order_error;
             }
         } else if ((errorMessage.toLowerCase()).indexOf('unexpected token') > -1) {
-            let lastErrorHtmlEncoded = jQuery("<textarea/>").text(angelleyeOrder.lastApiResponse).html();
-            angelleyeJsErrorLogger.logJsError('InvalidJSON, Received Response: ' + lastErrorHtmlEncoded, errorLogId);
+            angelleyeJsErrorLogger.logJsError('InvalidJSON', errorLogId);
             errorMessage = '<li>' + localizedMessages.create_order_error + '</li>';
         }
         if (errorMessage !== '') {
@@ -367,7 +357,7 @@ const angelleyeOrder = {
     },
     hideShowPlaceOrderButton: () => {
         let selectedPaymentMethod = angelleyeOrder.getSelectedPaymentMethod();
-        console.log('hideShowPlaceOrderButton', selectedPaymentMethod)
+
         let isAePpcpMethodSelected = angelleyeOrder.isAngelleyePpcpPaymentMethodSelected();
         if (isAePpcpMethodSelected === true) {
             jQuery('.wcf-pre-checkout-offer-action').val('');
@@ -407,7 +397,7 @@ const angelleyeOrder = {
         if (jQuery(payment_method_element_selector).length === 0) {
             payment_method_element_selector = 'form.wc-block-checkout__form';
         }
-        console.log(payment_method_element_selector);
+
         return payment_method_element_selector;
     },
     setPaymentMethodSelector: (paymentMethod) => {
@@ -424,9 +414,9 @@ const angelleyeOrder = {
         });
     },
     renderSmartButton: () => {
-        console.log('render smart buttons');
+
         jQuery.each(angelleye_ppcp_manager.button_selector, function (key, angelleye_ppcp_button_selector) {
-            console.log(angelleye_ppcp_button_selector);
+
             if (!jQuery(angelleye_ppcp_button_selector).length || jQuery(angelleye_ppcp_button_selector).children().length) {
                 return;
             }
@@ -576,15 +566,7 @@ const angelleyeOrder = {
                 }
             },
             onError: function (err) {
-                console.log('Error occurred:', err);
-                if (typeof err === 'object' && err !== null) {
-                    console.log('Error message:', err.message || 'No error message available');
-                    if (err.stack) {
-                        console.log('Stack trace:', err.stack);
-                    }
-                } else {
-                    console.log('Unexpected error format:', err);
-                }
+                angelleyeJsErrorLogger.logJsError('card_fields_error', errorLogId);
             },
             style: {
                 'input': {
@@ -627,16 +609,16 @@ const angelleyeOrder = {
                     angelleyeOrder.showProcessingSpinner(spinnerSelectors);
                     cardFields.submit().then(() => {
                     }).catch((error) => {
-                        console.log(error);
+
                     });
                 } else if (!data.isFormValid) {
                     jQuery(checkoutSelector).removeClass('processing paypal_cc_submiting CardFields createOrder');
                     angelleyeOrder.showError(localizedMessages.fields_not_valid);
                     return;
                 } else if (data.errors) {
-                    console.log(data);
+
                     data.errors.forEach(error => {
-                        console.log(error);
+
                     });
                 }
             });
@@ -673,13 +655,13 @@ const angelleyeOrder = {
         if (cartTotals) {
             // Check if the currency changed then reload the JS SDK with latest currency
             const updateCartTotal = () => {
-                console.log('angelleye_cart_total_updated', cartTotals);
+
                 angelleye_ppcp_manager.angelleye_cart_totals = cartTotals;
                 jQuery(document.body).trigger('angelleye_cart_total_updated');
             };
             const cartDetails = angelleyeOrder.getCartDetails();
             if (cartDetails.currencyCode !== cartTotals.currencyCode) {
-                console.log(`Currency changed, refreshing PayPal Lib SDK: ${cartDetails.currencyCode} => ${cartTotals.currencyCode}`);
+
                 let checkoutSelector = angelleyeOrder.getCheckoutSelectorCss();
                 angelleyeOrder.showProcessingSpinner(checkoutSelector);
                 angelleye_ppcp_manager.paypal_sdk_url = pfwUrlHelper.setQueryParam('currency', cartTotals.currencyCode, angelleye_ppcp_manager.paypal_sdk_url);
@@ -688,7 +670,7 @@ const angelleyeOrder = {
                     angelleyeOrder.renderPaymentButtons();
                     angelleyeOrder.hideProcessingSpinner(checkoutSelector);
                 }, () => {
-                    console.log('Unable to refresh the PayPal Lib');
+
                     angelleyeOrder.showError('<li>' + localizedMessages.currency_change_js_load_error + '</li>');
                     angelleyeOrder.hideProcessingSpinner(checkoutSelector);
                 });
@@ -724,13 +706,13 @@ const angelleyeOrder = {
                 }).catch(error => {
                     angelleyeOrder.showError(error);
                     angelleyeOrder.hideProcessingSpinner(addPaymentMethodForm);
-                    console.error('An error occurred:', error);
+
                 });
             },
             onError: (error) => {
                 angelleyeOrder.hideProcessingSpinner(addPaymentMethodForm);
                 angelleyeOrder.showError(error);
-                console.error('Something went wrong:', error)
+
             }
         });
         if (cardFields.isEligible()) {
@@ -749,11 +731,11 @@ const angelleyeOrder = {
                 if (angelleyeOrder.isCCPaymentMethodSelected() === true) {
                     event.preventDefault();
                     cardFields.submit().then((hf) => {
-                        console.log("add_payment_method_submit_success");
+
                     }).catch((error) => {
                         angelleyeOrder.hideProcessingSpinner(addPaymentMethodForm);
                         angelleyeOrder.showError(error);
-                        console.error("add_payment_method_submit_error:", error);
+
                     });
                 }
             }
@@ -777,7 +759,7 @@ const angelleyeOrder = {
             } else {
                 jQuery(document.body).trigger(event);
             }
-            console.log(event);
+
         }
     },
     renderPaymentButtons: () => {
@@ -793,7 +775,7 @@ const angelleyeOrder = {
     hooks: {
         handleWooEvents: () => {
             jQuery(document.body).on('updated_cart_totals payment_method_selected updated_checkout', function (event, data) {
-                console.log(`hook_received => ${event.type}`, data, angelleyeOrder.getCartDetails());
+
                 angelleyeOrder.dequeueEvent(event.type);
 
                 let response;
@@ -896,26 +878,30 @@ const angelleyeJsErrorLogger = {
         return Date.now() + Math.floor(Math.random() * 101);
     },
     addToLog: (errorLogId, metaData) => {
-        if (typeof angelleyeJsErrorLogger.errorStackMeta[errorLogId] === 'undefined') {
-            angelleyeJsErrorLogger.errorStackMeta[errorLogId] = [];
+        if (!metaData || typeof metaData !== 'object') return;
+        // Never retain request bodies, URLs, Response objects, contacts or SDK tokens.
+        if (!/^\d{1,20}$/.test(String(errorLogId))) return;
+        const ids = Object.keys(angelleyeJsErrorLogger.errorStackMeta);
+        if (ids.length >= 20 && !ids.includes(String(errorLogId))) {
+            delete angelleyeJsErrorLogger.errorStackMeta[ids[0]];
         }
-        angelleyeJsErrorLogger.errorStackMeta[errorLogId].push(metaData);
+        const trace = angelleyeJsErrorLogger.errorStackMeta[errorLogId] || [];
+        const diagnostic = {};
+        if (['api_request', 'api_response'].includes(metaData.context)) diagnostic.context = metaData.context;
+        if (['GET', 'POST'].includes(metaData.method)) diagnostic.method = metaData.method;
+        if (Number.isInteger(metaData.status) && metaData.status >= 100 && metaData.status <= 599) diagnostic.status = metaData.status;
+        trace.push(diagnostic);
+        angelleyeJsErrorLogger.errorStackMeta[errorLogId] = trace.slice(-10);
     },
-    getLogTrace: (errorLogId) => {
-        return typeof angelleyeJsErrorLogger.errorStackMeta[errorLogId] !== 'undefined' ?
-                angelleyeJsErrorLogger.errorStackMeta[errorLogId] : [];
-    },
+    getLogTrace: (errorLogId) => angelleyeJsErrorLogger.errorStackMeta[errorLogId] || [],
     logJsError: (error, errorLogId) => {
+        const logTrace = angelleyeJsErrorLogger.getLogTrace(errorLogId);
+        delete angelleyeJsErrorLogger.errorStackMeta[errorLogId];
+        // Arbitrary error messages/stacks can contain payment data or raw HTML.
         fetch(angelleye_ppcp_manager.handle_js_errors, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({error, logTrace: angelleyeJsErrorLogger.getLogTrace(errorLogId)}),
-        }).then(function (res) {
-            //alert(res.json());
-        }).then(function (data) {
-            //alert(data);
-        });
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({error: 'browser_error', logTrace}),
+        }).catch(() => {});
     }
 }

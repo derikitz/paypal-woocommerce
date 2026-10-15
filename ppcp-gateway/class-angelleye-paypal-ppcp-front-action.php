@@ -355,16 +355,9 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                     $this->angelleye_ppcp_display_order_page();
                     break;
                 case "handle_js_errors":
-                    $_POST = json_decode(file_get_contents('php://input'), true);
-                    if (isset($_POST['error']['msg']) && isset($_POST['error']['source']) && isset($_POST['error']['line'])) {
-                        $errorLine = html_entity_decode($_POST['error']['msg'], ENT_QUOTES) . ', file: ' . $_POST['error']['source'] . ', line:' . $_POST['error']['line'];
-                    } else {
-                        $errorLine = !empty($_POST['error']) ? print_r($_POST['error'], true) : '';
-                    }
-                    if (isset($_POST['logTrace'])) {
-                        $errorLine .= "\nLog Trace: " . print_r($_POST['logTrace'], true);
-                    }
-                    wc_get_logger()->error($errorLine, array('source' => 'angelleye_ppcp_js_errors'));
+                    // Do not trust client redaction; never persist arbitrary browser messages or bodies.
+                    $telemetry = json_decode(file_get_contents('php://input', false, null, 0, 16384), true);
+                    AngellEYE_PayPal_PPCP_Log::instance()->browser_error($telemetry);
                     break;
                 case "cc_capture":
                     wc_clear_notices();

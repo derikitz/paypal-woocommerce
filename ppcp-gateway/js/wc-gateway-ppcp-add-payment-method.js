@@ -1,7 +1,7 @@
 (function () {
     'use strict';
     function initializePayPal() {
-        console.log('PayPal lib loaded, initialize add payment method.');
+
         angelleyeOrder.addPaymentMethodAdvancedCreditCard();
     }
     angelleyeLoadPayPalScript({

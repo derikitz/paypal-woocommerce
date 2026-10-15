@@ -1,10 +1,10 @@
 function initSmartButtons() {
-    console.log('initSmartButtons');
+
     let $ = jQuery;
     if (typeof angelleye_ppcp_manager === 'undefined') {
         return false;
     }
-    
+
     let checkoutSelector = angelleyeOrder.getCheckoutSelectorCss();
     if ($('.variations_form').length) {
             let div_to_hide_show = '#angelleye_ppcp_product, #angelleye_ppcp_product_google_pay, #angelleye_ppcp_product_apple_pay';
@@ -35,7 +35,7 @@ function initSmartButtons() {
             return true;
         });
     }
-    
+
     $(checkoutSelector).on('checkout_place_order_angelleye_ppcp_cc', function (event) {
         if (angelleyeOrder.isCardFieldEligible() === true) {
             event.preventDefault();
@@ -89,11 +89,11 @@ function initSmartButtons() {
     angelleyeOrder.hooks.handleRaceConditionOnWooHooks();
 
     const paypalSdkLoadCallback = () => {
-        console.log('PayPal lib loaded, initialize buttons.');
+
         let scriptsToLoad = [];
         if (angelleyeOrder.isApplePayEnabled()) {
             let appleResolveOnLoad = new Promise((resolve) => {
-                console.log('apple sdk loaded');
+
                 resolve();
             });
             scriptsToLoad.push({
@@ -104,7 +104,7 @@ function initSmartButtons() {
 
         if (angelleyeOrder.isGooglePayEnabled()) {
             let googleResolveOnLoad = new Promise((resolve) => {
-                console.log('google sdk loaded');
+
                 resolve();
             });
             scriptsToLoad.push({
@@ -121,10 +121,10 @@ function initSmartButtons() {
                 allPromises.push(scriptsToLoad[i].callback);
             }
             Promise.all(allPromises).then((success) => {
-                console.log('all libs loaded');
+
                 initSmartButtons();
             }, (error) => {
-                console.log('An error occurred in loading the SDKs.');
+
             });
             for (let i = 0; i < scriptsToLoad.length; i++) {
                 angelleyeLoadPayPalScript(scriptsToLoad[i], scriptsToLoad[i].callback);
@@ -143,7 +143,7 @@ function initSmartButtons() {
 
 
 
-    
+
 })(jQuery);
 
 window.onerror = function (msg, source, lineNo) {

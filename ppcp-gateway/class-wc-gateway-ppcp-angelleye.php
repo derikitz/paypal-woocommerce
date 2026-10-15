@@ -502,16 +502,7 @@ class WC_Gateway_PPCP_AngellEYE extends WC_Payment_Gateway {
 			ob_end_clean();
 		}
 
-		if ( class_exists( 'WC_Logger' ) ) {
-			$logger = wc_get_logger();
-			$logger->info(
-				PHP_EOL . PHP_EOL .
-				'========== PAYER_ACTION_REQUIRED ==========' . PHP_EOL .
-				'Redirecting to PayPal payer-action URL: ' . $is_success['redirect_url'] . PHP_EOL .
-				'==========================================' . PHP_EOL . PHP_EOL,
-				array( 'source' => 'angelleye_ppcp' )
-			);
-		}
+        AngellEYE_PayPal_PPCP_Log::instance()->log(array('action' => 'payer_action_required'));
 
 		return array(
 			'result'   => 'success',

@@ -103,6 +103,12 @@ class AngellEYE_PayPal_PPCP_Response {
         try {
             if (is_wp_error($paypal_api_response)) {
                 delete_transient('is_angelleye_aws_down');
+                if ($log_response) {
+                    try {
+                        $this->api_log->log(array('action' => $action_name, 'issue' => 'TRANSPORT_ERROR',
+                            'http_status' => 0), 'error');
+                    } catch (Throwable $ex) { /* Diagnostics cannot replace the payment result. */ }
+                }
                 return $this->failure('TRANSPORT_ERROR', $paypal_api_response->get_error_message(), 0,
                     array(), (string) $paypal_api_response->get_error_code());
             }
@@ -156,7 +162,11 @@ class AngellEYE_PayPal_PPCP_Response {
             }
             if ($log_response) {
                 try {
-                    $this->angelleye_ppcp_write_log($url, $request, $paypal_api_response, $action_name);
+                    $log_response_data = self::is_error($response) ? array(
+                        'response' => array('code' => $response['http_status']),
+                        'body' => json_encode($response),
+                    ) : $paypal_api_response;
+                    $this->angelleye_ppcp_write_log($url, $request, $log_response_data, $action_name);
                     if (!self::is_error($response) && strpos($url, 'paypal.com') !== false) {
                         do_action('angelleye_ppcp_request_respose_data', $request, $response, $action_name);
                     }
@@ -171,38 +181,39 @@ class AngellEYE_PayPal_PPCP_Response {
     }
 
     public function angelleye_ppcp_write_log($url, $request, $response, $action_name = 'Exception') {
-        global $wp_version;
-        if(in_array($action_name, array('list_all_payment_tokens', 'get_order', 'get_capture'))) {
-            return;
+        $body = isset($response['body']) ? $response['body'] : $response;
+        if (is_string($body)) {
+            $body = json_decode($body, true);
         }
-        $environment = ($this->is_sandbox === true) ? 'SANDBOX' : 'LIVE';
-        $this->api_log->log('PayPal Environment: ' . $environment);
-        $this->api_log->log('WordPress Version: ' . $wp_version);
-        $this->api_log->log('WooCommerce Version: ' . WC()->version);
-        $this->api_log->log('PFW Version: ' . VERSION_PFW);
-        $this->api_log->log('Action: ' . ucwords(str_replace('_', ' ', $action_name)));
-        $this->api_log->log('Request URL: ' . $url);
-        $response_body = isset($response['body']) ? json_decode($response['body'], true) : $response;
-        if ($action_name === 'generate_signup_link') {
-            $this->angelleye_ppcp_signup_link_write_log($request);
-        } elseif (!empty($request['body']) && is_array($request['body'])) {
-            $this->api_log->log('Request Body: ' . wc_print_r($request['body'], true));
-        } elseif (isset($request['body']) && !empty($request['body']) && is_string($request['body'])) {
-            $this->api_log->log('Request Body: ' . wc_print_r(json_decode($request['body'], true), true));
+        // Proxy envelopes can contain either JSON strings or decoded upstream bodies.
+        if (is_array($body) && isset($body['body']) && is_string($body['body'])) {
+            $body['body'] = json_decode($body['body'], true);
         }
-        if (!empty($response_body['requestId'])) {
-            $this->api_log->log('Request ID: ' . wc_print_r($response_body['requestId'], true));
+        $headers = isset($response['headers']) ? $response['headers'] : array();
+        $status = isset($response['response']['code']) ? (int) $response['response']['code'] : 0;
+        $upstream = is_array($body) && isset($body['body']) && is_array($body['body']) ? $body['body'] : $body;
+        if (is_array($body) && isset($body['statusCode']) && is_numeric($body['statusCode'])) {
+            $status = (int) $body['statusCode'];
         }
-        if (!empty($response_body['headers'])) {
-            $this->api_log->log('Response Headers: ' . wc_print_r($response_body['headers'], true));
+        $resource_id = '';
+        $resource_key = in_array($action_name, array('create_order', 'capture_order', 'authorize_order'), true) ? 'order_id' :
+            ($action_name === 'refund_order' ? 'refund_id' : 'transaction_id');
+        if (in_array($action_name, array('create_order', 'capture_order', 'authorize_order', 'refund_order', 'capture_authorized', 'void_authorized'), true) && is_array($upstream)) {
+            $resource_id = $upstream['id'] ?? '';
         }
-        if (!empty($response_body['body']) && is_array($response_body['body'])) {
-            $this->api_log->log('Response Body: ' . wc_print_r($response_body['body'], true));
-        } elseif (is_array($response_body)) {
-            $this->api_log->log('Response Body: ' . wc_print_r($response_body, true));
-        } else {
-            $this->api_log->log('Response Body: ' . wc_print_r(json_decode(wp_remote_retrieve_body($response_body), true), true));
-        }
+        $failed = $status >= 400 || (is_array($body) &&
+            (isset($upstream['name']) || isset($upstream['error']) || !empty($upstream['_angelleye_error'])));
+        $this->api_log->log(array(
+            'action' => $action_name,
+            'environment' => $this->is_sandbox ? 'SANDBOX' : 'LIVE',
+            'http_status' => $status,
+            'debug_id' => $this->angelleye_ppcp_parse_headers($headers, 'paypal-debug-id'),
+            'request_id' => isset($request['headers']) ?
+                $this->angelleye_ppcp_parse_headers($request['headers'], 'paypal-request-id') : '',
+            $resource_key => $resource_id,
+            'capture_id' => is_array($upstream) ? ($upstream['purchase_units'][0]['payments']['captures'][0]['id'] ?? '') : '',
+            'response' => $body,
+        ), $failed ? 'error' : 'info');
     }
 
     public function angelleye_ppcp_load_class() {
@@ -227,7 +238,9 @@ class AngellEYE_PayPal_PPCP_Response {
             if (in_array($action_name, $allow_payment_event)) {
                 if (class_exists('AngellEYE_PFW_Payment_Logger')) {
                     $amount = '';
-                    $transaction_id = '';
+                    $resource_id = '';
+        $resource_key = in_array($action_name, array('create_order', 'capture_order', 'authorize_order'), true) ? 'order_id' :
+            ($action_name === 'refund_order' ? 'refund_id' : 'transaction_id');
                     if (isset($response['purchase_units']['0']['amount']['value'])) {
                         $amount = $response['purchase_units']['0']['amount']['value'];
                     } elseif (isset($response['amount']['value'])) {
@@ -283,28 +296,7 @@ class AngellEYE_PayPal_PPCP_Response {
     }
 
     public function angelleye_ppcp_signup_link_write_log($request) {
-        if (isset($request['body'])) {
-            $data = json_decode($request['body'], true);
-            if (isset($data['tracking_id'])) {
-                $this->generate_signup_link_default_request_param['tracking_id'] = $data['tracking_id'];
-            }
-            if (isset($data['return_url'])) {
-                $this->generate_signup_link_default_request_param['partner_config_override']['return_url'] = $data['return_url'];
-            }
-            if (isset($data['return_url'])) {
-                $this->generate_signup_link_default_request_param['partner_config_override']['return_url_description'] = $data['return_url_description'];
-            }
-            if (isset($data['products'])) {
-                $this->generate_signup_link_default_request_param['products'] = $data['products'];
-            }
-            if (isset($data['capabilities'])) {
-                $this->generate_signup_link_default_request_param['capabilities'] = $data['capabilities'];
-            }
-            if (isset($data['third_party_features']) && !empty($data['third_party_features'])) {
-                $this->generate_signup_link_default_request_param['operations'][0]['api_integration_preference']['rest_api_integration']['third_party_details']['features'] = array_merge($this->generate_signup_link_default_request_param['operations'][0]['api_integration_preference']['rest_api_integration']['third_party_details']['features'], $data['third_party_features']);
-            }
-            $this->api_log->log('Request Body: ' . wc_print_r($this->generate_signup_link_default_request_param, true));
-        }
+        $this->api_log->log(array('action' => 'generate_signup_link'));
     }
 
 }

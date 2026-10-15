@@ -4,14 +4,13 @@ const payLaterMessaging = {
             return false;
         }
         if (typeof angelleye_paypal_sdk === 'undefined') {
-            console.log('Unable to render the PayLaterMessaging: PayPal lib not defined.')
+
             return;
         }
         if (typeof angelleye_paypal_sdk.Messages === 'undefined') {
-            console.log('PayLaterMessaging is not enabled for this merchant account.')
+
             return;
         }
-        // console.log('Init PayLater');
         let amount = angelleye_pay_later_messaging.amount;
         let currencyCode = angelleye_pay_later_messaging.currencyCode;
         let placementsConfig = angelleye_pay_later_messaging.placements;
@@ -91,7 +90,7 @@ const payLaterMessaging = {
         url: angelleye_ppcp_manager.paypal_sdk_url,
         script_attributes: angelleye_ppcp_manager.paypal_sdk_attributes
     }, function () {
-        console.log('PayPal lib loaded, initialize pay later messaging.');
+
         jQuery(document.body).on('ppcp_block_ready, ppcp_block_paylater_ready', async function () {
             payLaterMessaging.init();
         });
@@ -99,7 +98,6 @@ const payLaterMessaging = {
         if (angelleyeOrder.isCartPage() || angelleyeOrder.isCheckoutPage()) {
             jQuery(document.body).on('angelleye_cart_total_updated ppcp_block_ready', async function () {
                 const cartDetails = angelleyeOrder.getCartDetails();
-                // console.log('PayLater amount update', cartDetails.totalAmount);
                 angelleye_pay_later_messaging.amount = cartDetails.totalAmount;
                 angelleye_pay_later_messaging.currencyCode = cartDetails.currencyCode;
                 payLaterMessaging.init();

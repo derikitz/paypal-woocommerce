@@ -179,8 +179,7 @@ class AngellEYE_PFW_Payment_Logger {
             );
             $response = wp_remote_post($this->api_url, $post_args);
             if (is_wp_error($response)) {
-                $error_message = $response->get_error_message();
-                error_log(print_r($error_message, true));
+                error_log('PayPal payment telemetry transport failed.');
                 return false;
             } else {
                 $body = json_decode(wp_remote_retrieve_body($response), true);

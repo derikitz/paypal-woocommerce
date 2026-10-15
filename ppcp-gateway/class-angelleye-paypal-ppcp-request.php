@@ -282,20 +282,7 @@ class AngellEYE_PayPal_PPCP_Request {
 	    if ($mock->is_enabled()) {
 		    $mock_response = $mock->get_mock_response($url, $action_name);
 		    if (!empty($mock_response)) {
-			    // Log it for visibility
-			    if (class_exists('WC_Logger')) {
-				    $logger = wc_get_logger();
-				    $logger->info(
-					    PHP_EOL . PHP_EOL .
-					    '========== MOCKED PAYPAL RESPONSE ==========' . PHP_EOL .
-					    'Endpoint: ' . $url . PHP_EOL .
-					    'Action: ' . $action_name . PHP_EOL .
-					    'Mock Scenario: ' . $mock->get_mock_scenario() . PHP_EOL .
-					    'Returned Mocked Data: ' . print_r($mock_response, true) .
-					    PHP_EOL . '==========================================' . PHP_EOL,
-					    array('source' => 'angelleye_ppcp')
-				    );
-			    }
+                AngellEYE_PayPal_PPCP_Log::instance()->log(array('action' => 'mock_response'));
 
 			    return $mock_response;
 		    }

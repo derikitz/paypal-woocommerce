@@ -181,7 +181,7 @@ class Cartflows_Pro_Gateway_PayPal_PPCP_CC_AngellEYE extends Cartflows_Pro_Paypa
                 );
                 wcf()->logger->log(
                         "PayPal order is not created. Order: {$order_id}, Error: " .
-                        wp_json_encode($error_message)
+                        '[REDACTED]'
                 );
                 return wp_send_json($json_response);
             } else {
@@ -239,7 +239,7 @@ class Cartflows_Pro_Gateway_PayPal_PPCP_CC_AngellEYE extends Cartflows_Pro_Paypa
             );
             wcf()->logger->log(
                     "Order Created but not captured. For WC-Order: {$order_id}, Error: " .
-                    wp_json_encode($error_message)
+                    '[REDACTED]'
             );
         } else {
             $json_response = array(
@@ -374,7 +374,7 @@ class Cartflows_Pro_Gateway_PayPal_PPCP_CC_AngellEYE extends Cartflows_Pro_Paypa
         if ($this->is_api_refund) {
             $result = $gateway->process_refund($order->get_id(), $refund_amount, $refund_reason);
             if (is_wp_error($result)) {
-                wcf()->logger->log("PayPal offer refund failed. Order: {$order_id}, Error: " . print_r($result->get_error_message(), true)); // phpcs:ignore
+                wcf()->logger->log("PayPal offer refund failed. Order: {$order_id}, Error: " . '[REDACTED]'); // phpcs:ignore
             } elseif ($result) {
                 $response = $result;
             }

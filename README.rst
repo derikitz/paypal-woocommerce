@@ -88,7 +88,30 @@ responses retain the empty-string contract. The void caller maps a confirmed
 no-content result to ``VOIDED``. Failed order updates stop capture, and upsell
 adapters use the shared error predicate. ID-token responses are parsed without
 passing sensitive bodies to the payment logger. Logger/observer exceptions do
-not replace a valid payment response. Broader log redaction remains audit stage 7.
+not replace a valid payment response.
+
+Payment diagnostics
+-------------------
+
+New gateway configurations default to errors and warnings. Existing saved debug
+preferences remain in effect. Verbose diagnostics retain only bounded fields
+such as action, HTTP status, PayPal issue codes, debug IDs, request IDs and payment
+resource IDs. Request bodies, credentials, customer details, wallet tokens, URLs,
+and arbitrary response/error text are omitted. Legacy free-text logger calls
+record a redaction event and source location; use structured diagnostic arrays
+for new log entries. Temporary and migration logs respect the same debug setting.
+FunnelKit and CartFlows diagnostics also omit raw payload/error text; those
+extensions retain control over their own log settings.
+
+Browser telemetry retains at most ten context/method/status entries per operation
+and twenty operations. The server independently limits and filters received
+traces. Error messages, stacks and raw response bodies are not reported. Checkout
+scripts no longer print SDK/customer objects to the browser console. Run
+``php tests/security/logging-redaction.php`` and
+``node tests/security/logging-redaction.cjs`` to check PHP redaction, verbosity,
+direct/proxy diagnostics and shipped browser bundles. WordPress/WooCommerce,
+wallet and extension integration checks still need staging validation. Historical
+logs are unchanged; review and remove them under your retention policy.
 
 Google Pay capture handling
 ---------------------------

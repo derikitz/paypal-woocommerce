@@ -53,7 +53,7 @@ class ApplePayCheckoutButton {
                 this.renderButton(containerSelector);
             });
         } else {
-            console.log('apple pay not supported');
+
             this.removeApplePayPaymentMethod(containerSelector);
         }
     }
@@ -78,7 +78,7 @@ class ApplePayCheckoutButton {
         this.initProductCartPage();
         let container = jQuery(containerSelector);
         container.html('');
-        console.log('rendering apple_pay button', containerSelector, container);
+
         // let applePayBtn = jQuery('<button type="button" id="apple-pay-btn" class="apple-pay-button apple-pay-button-black">Apple Pay</button>');
         let buttonColor = 'black';
         let buttonType = 'plain';
@@ -143,7 +143,7 @@ class ApplePayCheckoutButton {
 
         // check if the saved payment method selected
         let isSavedPaymentMethodSelected = jQuery('input[name=wc-angelleye_ppcp_apple_pay-payment-token]:checked').val();
-        console.log('isSavedPaymentMethodSelected', isSavedPaymentMethodSelected)
+
         if (isSavedPaymentMethodSelected !== 'new' && typeof isSavedPaymentMethodSelected !== 'undefined') {
             await ApplePayCheckoutButton.handleTokenPayment(event, errorLogId);
             return;
@@ -174,13 +174,13 @@ class ApplePayCheckoutButton {
             lineItems: cartDetails.lineItems,
             ...subscriptionParams
         };
-        console.log('paymentRequest', ApplePayCheckoutButton.applePayConfig, paymentRequest);
+
 
         let session = null;
         try {
              session = new ApplePaySession(4, paymentRequest);
         } catch (e) {
-            console.log("ApplePay error session init error: ", e);
+
             angelleyeOrder.hideProcessingSpinner();
             angelleyeOrder.showError(localizedMessages.apple_pay_pay_error + '<br/>Error:' + e);
             angelleyeJsErrorLogger.logJsError(localizedMessages.apple_pay_pay_error + '<br/>Error:' + e, errorLogId);
@@ -202,8 +202,8 @@ class ApplePayCheckoutButton {
         };
 
         let parseErrorMessage = (errorObject) => {
-            console.error(errorObject)
-            console.log(JSON.stringify(errorObject));
+
+
             if (errorObject.name === 'PayPalApplePayError') {
                 let debugID = errorObject.paypalDebugId;
                 switch (errorObject.errorName) {
@@ -239,7 +239,7 @@ class ApplePayCheckoutButton {
 
         session.onshippingcontactselected = async (event) => {
             const cartDetails = angelleyeOrder.getCartDetails();
-            console.log('on shipping contact selected', event);
+
             let newTotal = {
                 label: localizedMessages.total_amount_placeholder,
                 amount: `${cartDetails.totalAmount}`,
@@ -248,7 +248,7 @@ class ApplePayCheckoutButton {
 
             try {
                 let response = await angelleyeOrder.shippingAddressUpdate({shippingDetails: event.shippingContact});
-                console.log('shipping update response', response);
+
                 if (typeof response.totalAmount !== 'undefined') {
                     angelleyeOrder.updateCartTotalsInEnvironment(response);
                     newTotal.amount = response.totalAmount;
@@ -257,7 +257,7 @@ class ApplePayCheckoutButton {
                         newLineItems: response.lineItems,
                         errors: [],
                     };
-                    console.log('updating total amount', shippingContactUpdate);
+
                     Object.assign(paymentRequest, {
                         total: newTotal,
                         lineItems: response.lineItems
@@ -272,14 +272,14 @@ class ApplePayCheckoutButton {
         };
 
         session.onshippingmethodselected = async (event) => {
-            console.log('on shipping method selected', event);
+
             let shippingMethodUpdate = {}
             session.completeShippingMethodSelection(shippingMethodUpdate);
         }
 
         session.onpaymentauthorized = async (event) => {
             try {
-                console.log('paymentAuthorized', event);
+
                 // create the order to send a payment request
                 let orderID = await angelleyeOrder.createOrder({
                     angelleye_ppcp_button_selector: containerSelector,
@@ -287,7 +287,7 @@ class ApplePayCheckoutButton {
                     shippingDetails: event.payment.shippingContact,
                     errorLogId
                 }).then((orderData) => {
-                    console.log('orderCreated', orderData);
+
                     return orderData.orderID;
                 });
 
@@ -306,7 +306,7 @@ class ApplePayCheckoutButton {
         };
 
         session.oncancel  = (event) => {
-            console.log("Apple Pay Cancelled !!", event)
+
             paymentCancelled();
         }
 

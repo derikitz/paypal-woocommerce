@@ -11,7 +11,7 @@ jQuery(document).ready(function ($) {
                 progressBar.css('width', response.percentage + '%');
                 $('#progress_bar_percentage').text(parseInt(response.percentage) + '%');$
                 $('#progress_label').text(response.label);
-                console.log(response);
+
                 if (response.status === 'complete') {
                     setTimeout(function () {
                         window.location.reload();

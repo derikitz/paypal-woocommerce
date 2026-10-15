@@ -249,7 +249,7 @@ if (!class_exists('WC_Gateway_PPCP_AngellEYE_Settings')) {
                 'cards_input_padding' => '',
                 'soft_descriptor' => 'PPCP',
                 'error_email_notification' => 'yes',
-                'debug' => 'everything',
+                'debug' => 'errors_warnings_only',
                 'enable_google_pay' => 'no',
                 'enable_apple_pay' => 'no'
             );
@@ -2162,13 +2162,13 @@ if (!class_exists('WC_Gateway_PPCP_AngellEYE_Settings')) {
                     'title' => __('Debug log', 'paypal-for-woocommerce'),
                     'type' => 'select',
                     'class' => 'wc-enhanced-select',
-                    'description' => sprintf(__('Log PayPal events, such as Payment, Refund inside %s Note: this may log personal information. We recommend using this for debugging purposes only and deleting the logs when finished.', 'paypal-for-woocommerce'), '<code>' . WC_Log_Handler_File::get_log_file_path('angelleye_ppcp') . '</code>'),
+                    'description' => sprintf(__('Log PayPal events, such as Payment, Refund inside %s Logs contain limited diagnostic fields. Enable verbose diagnostics only while troubleshooting.', 'paypal-for-woocommerce'), '<code>' . WC_Log_Handler_File::get_log_file_path('angelleye_ppcp') . '</code>'),
                     'options' => array(
-                        'everything' => __('Everything', 'paypal-for-woocommerce'),
+                        'everything' => __('Verbose diagnostics', 'paypal-for-woocommerce'),
                         'errors_warnings_only' => __('Errors and Warnings Only', 'paypal-for-woocommerce'),
                         'disabled' => __('Disabled', 'paypal-for-woocommerce')
                     ),
-                    'default' => 'everything'
+                    'default' => 'errors_warnings_only'
                 )
             );
             if(class_exists('WC_Pre_Orders') === false) {

@@ -964,7 +964,7 @@ jQuery(function ($) {
             type: 'GET',
             url: actionUrl
         }).then((response) => {
-            console.log(response);
+
             if (response.status) {
                 link.closest('tr').remove();
                 window.location.reload();

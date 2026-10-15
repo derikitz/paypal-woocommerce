@@ -61,7 +61,7 @@ class GooglePayCheckoutButton {
                     }
                 })
                 .catch((err) => {
-                    console.error('errorcatch',err);
+
                     this.removeGooglePayPaymentMethod(containerSelector);
                 });
         });
@@ -167,7 +167,7 @@ class GooglePayCheckoutButton {
 
     onPaymentDataChanged(additionalData, intermediatePaymentData) {
         return new Promise(async function(resolve, reject) {
-            console.log('on shipping changed', intermediatePaymentData);
+
             let shippingAddress = intermediatePaymentData.shippingAddress;
             let paymentDataRequestUpdate = {};
 
@@ -188,7 +188,7 @@ class GooglePayCheckoutButton {
                         throw new Error(localizedMessages.shipping_amount_update_error);
                     }
                 } catch (error) {
-                    console.log('shipping change error');
+
                     angelleyeOrder.handleCreateOrderError(additionalData.thisObject.parseErrorMessage(error), additionalData.thisObject.errorLogId);
                     paymentDataRequestUpdate.error = localizedMessages.shipping_amount_pull_error;
                     reject(localizedMessages.shipping_amount_pull_error);
@@ -334,7 +334,7 @@ class GooglePayCheckoutButton {
             angelleyeOrder.showError(angelleye_ppcp_manager.payment_status_unconfirmed);
             return;
         }
-        console.log('click event', event, thisObject.containerSelector);
+
         thisObject.errorLogId = angelleyeJsErrorLogger.generateErrorId();
         const cartDetails = angelleyeOrder.getCartDetails();
         if (cartDetails.totalAmount <= 0) {
@@ -356,7 +356,7 @@ class GooglePayCheckoutButton {
             angelleyeOrder.triggerPaymentCancelEvent();
             angelleyeOrder.hideProcessingSpinner(thisObject.containerSelector);
             angelleyeOrder.hideProcessingSpinner();
-            console.log('error handler click', e);
+
         });
 
     }
