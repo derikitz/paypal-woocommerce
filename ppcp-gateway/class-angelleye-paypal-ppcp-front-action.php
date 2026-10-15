@@ -1,6 +1,7 @@
 <?php
 
 defined('ABSPATH') || exit;
+require_once __DIR__ . '/class-angelleye-paypal-ppcp-order-access.php';
 
 class AngellEYE_PayPal_PPCP_Front_Action {
 
@@ -102,6 +103,17 @@ class AngellEYE_PayPal_PPCP_Front_Action {
     public function handle_wc_api() {
         global $wp;
         if (!empty($_GET['angelleye_ppcp_action'])) {
+            $pay_order = false;
+            if (in_array($_GET['angelleye_ppcp_action'], array('create_order', 'shipping_address_update'), true) &&
+                (($_GET['from'] ?? '') === 'pay_page' || array_key_exists('woo_order_id', $_POST))) {
+                $pay_order = AngellEYE_PayPal_PPCP_Order_Access::authorize_request($_POST);
+                if (!$pay_order || ($_GET['from'] ?? '') !== 'pay_page') {
+                    wp_send_json_error(array('messages' => array(
+                        __('Unable to access this order. Please reopen its payment link and try again.', 'paypal-for-woocommerce'),
+                    )), 403);
+                    return;
+                }
+            }
             switch ($_GET['angelleye_ppcp_action']) {
                 case "cancel_order":
                     AngellEye_Session_Manager::clear();
@@ -154,16 +166,16 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                     self::$checkout_started_from = $request_from_page;
 
                     if ('pay_page' === $request_from_page) {
-                        $woo_order_id = $_POST['woo_order_id'];
+                        $woo_order_id = $pay_order->get_id();
                         if (isset(WC()->session) && !WC()->session->has_session()) {
                             WC()->session->set_customer_session_cookie(true);
                         }
-                        WC()->session->set('order_awaiting_payment', $woo_order_id);
-                        $order = wc_get_order($woo_order_id);
+                        $order = $pay_order;
                         do_action('woocommerce_before_pay_action', $order);
                         $error_messages = wc_get_notices('error');
                         wc_clear_notices();
                         if (empty($error_messages)) {
+                            WC()->session->set('order_awaiting_payment', $woo_order_id);
                             $this->payment_request->angelleye_ppcp_create_order_request($woo_order_id);
                         } else {
                             $errors = [];
@@ -275,7 +287,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                 case 'shipping_address_update':
                     global $woocommerce;
                     $paymentMethod = $_REQUEST['angelleye_ppcp_payment_method_title'] ?? null;
-                    $woo_order_id = $_POST['woo_order_id'] ?? null;
+                    $woo_order_id = $pay_order ? $pay_order->get_id() : null;
                     if (isset($_REQUEST['shipping_address_source'])) {
                         $shipping_address = json_decode(stripslashes($_REQUEST['shipping_address_source']), true);
                         $shipping_address = $shipping_address['shippingDetails'] ?? null;
@@ -337,7 +349,7 @@ class AngellEYE_PayPal_PPCP_Front_Action {
                         }
                     }
                     if (!empty($woo_order_id)) {
-                        $order = wc_get_order($woo_order_id);
+                        $order = $pay_order;
                         if (is_a($order, 'WC_Order')) {
                             $response = $this->payment_request->ae_get_updated_checkout_payment_data($order);
                         } else {

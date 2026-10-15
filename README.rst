@@ -27,6 +27,7 @@ Work proceeds in separate, reviewable stages:
 5. Correct Google Pay success/failure propagation and capture completion.
 6. Normalize transport error responses.
 7. Redact sensitive payment logs.
+8. Authorize existing-order pay-page creation and totals requests.
 
 After each stage, run focused checks, review the diff, provide a commit message,
 and pause for review and a separate commit before beginning the next stage.
@@ -89,6 +90,24 @@ no-content result to ``VOIDED``. Failed order updates stop capture, and upsell
 adapters use the shared error predicate. ID-token responses are parsed without
 passing sensitive bodies to the payment logger. Logger/observer exceptions do
 not replace a valid payment response.
+
+Existing-order payment access
+-----------------------------
+
+Pay-page order creation and shipping/totals AJAX requests require the matching
+order key, WooCommerce ``pay_for_order`` permission, a payable order, POST and an
+order-specific nonce. Rejected requests return HTTP 403 before modifying checkout
+state or returning order data. The pay form supplies the key and nonce; keep these
+hidden fields when customizing the template. Payment-page data and credential
+output also respect WooCommerce guest email verification where available.
+
+Run ``php tests/security/order-access.php`` and
+``node tests/security/order-access.cjs`` to check access controls and pay-page
+form serialization in both source and production JavaScript. Validate account
+and guest links, email verification, wallet flows and custom templates in staging.
+Remote PayPal/local order mapping across capture and review callbacks remains a
+separate audit follow-up. Webhook handling is not configured or verified for this
+fork; no webhook listener/subscription has been added in this stage.
 
 Payment diagnostics
 -------------------

@@ -151,7 +151,7 @@ const angelleyeOrder = {
             });
         }
         let topCheckoutSelectors = ['#angelleye_ppcp_checkout_top', '#angelleye_ppcp_checkout_top_google_pay', '#angelleye_ppcp_checkout_top_apple_pay'];
-        if (is_from_checkout && topCheckoutSelectors.indexOf(angelleye_ppcp_button_selector) > -1) {
+        if (is_from_checkout && angelleye_ppcp_manager.is_pay_page !== 'yes' && topCheckoutSelectors.indexOf(angelleye_ppcp_button_selector) > -1) {
             formData = '';
         } else {
             if (is_from_product) {

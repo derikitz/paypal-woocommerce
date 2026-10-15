@@ -1,5 +1,6 @@
 <?php
 defined('ABSPATH') || exit;
+require_once __DIR__ . '/class-angelleye-paypal-ppcp-order-access.php';
 
 class AngellEYE_PayPal_PPCP_Smart_Button {
 
@@ -654,8 +655,9 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
                 // get order details
                 global $wp;
                 $order_id = $wp->query_vars['order-pay'];
-                $order = wc_get_order($order_id);
-                // If the order is not retrieved then do not enqueue the JS
+                $order = AngellEYE_PayPal_PPCP_Order_Access::payment_page_order($order_id,
+                    isset($_GET['key']) && is_string($_GET['key']) ? wp_unslash($_GET['key']) : '');
+                // Do not expose order totals to an unauthorized payment-page visitor.
                 if (!is_a($order, 'WC_Order')) {
                     return;
                 }
@@ -702,7 +704,11 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
                 if (is_checkout_pay_page() && isset($wp->query_vars['order-pay'])) {
                     $order_id = $wp->query_vars['order-pay'];
                     $order_id = absint($order_id);
-                    $order = wc_get_order($order_id);
+                    $order = AngellEYE_PayPal_PPCP_Order_Access::payment_page_order($order_id,
+                        isset($_GET['key']) && is_string($_GET['key']) ? wp_unslash($_GET['key']) : '');
+                    if (!$order) {
+                        return;
+                    }
                     $first_name = $order->get_billing_first_name();
                     $last_name = $order->get_billing_last_name();
                 }
@@ -1445,10 +1451,17 @@ class AngellEYE_PayPal_PPCP_Smart_Button {
 
     public function angelleye_ppcp_add_order_id() {
         global $wp;
-        $order_id = absint($wp->query_vars['order-pay']);
+        $order_id = $wp->query_vars['order-pay'] ?? null;
+        $order_key = isset($_GET['key']) && is_string($_GET['key']) ? wp_unslash($_GET['key']) : '';
+        $order = AngellEYE_PayPal_PPCP_Order_Access::payment_page_order($order_id, $order_key);
+        if (!$order) {
+            return;
+        }
         ?>
-        <input type="hidden" name="woo_order_id" value="<?php echo $order_id; ?>" />
+        <input type="hidden" name="woo_order_id" value="<?php echo esc_attr($order->get_id()); ?>" />
+        <input type="hidden" name="woo_order_key" value="<?php echo esc_attr($order_key); ?>" />
         <?php
+        wp_nonce_field('angelleye_ppcp_pay_order_' . $order->get_id(), 'angelleye_ppcp_pay_order_nonce', false);
     }
 
     public function angelleye_ppcp_hide_show_gateway($methods) {
